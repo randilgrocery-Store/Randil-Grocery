@@ -58,21 +58,23 @@ Unit tests cover the bilingual labels and parsing of real
 
 ## ⚠️ Machine note (this laptop)
 
-**This laptop cannot produce an Android APK.** Every LLVM-built native tool in
-the Android SDK/NDK — `cmake`, `ninja`, `clang`, `llvm-strip`, `llvm-readelf`,
-etc. — crashes at startup with a stack overflow (exit `0xC00000FD`) on this
-Windows build (26200). Verified with minimal repros (`ninja --version` alone
-crashes; the official MSVC-built ninja/CMake work; all four installed NDKs'
-clang crash). Android's Gradle build requires the NDK compiler check to pass,
-so no configuration change can work around it on this machine.
+**The APK is built by GitHub Actions (cloud)** — see `.github/workflows/build-apk.yml`.
+Any push to `main` touching `randil_mobile/` (or a manual
+`gh workflow run build-apk.yml`) builds `app-release.apk` on GitHub's Linux
+runners and uploads it as the `randil-mobile-apk` artifact:
+`gh run download <run> -n randil-mobile-apk`. A built copy is kept at
+`dist/app-release.apk`.
 
-- ✅ Everything that *doesn't* need the Android toolchain works here: the app
-  code, `flutter analyze`, unit tests, and `flutter build windows` (demo
-  build: `build\windows\x64\runner\Release\randil_mobile.exe`).
-- ✅ To get the APK, run `flutter build apk --release` on any normal
-  Windows 10/11, macOS or Linux machine with Flutter + Android SDK installed.
-  No special setup is needed there — standard Flutter project.
-- The MSVC-built CMake 3.30.5 + ninja 1.12.1 are still installed in the SDK's
-  `cmake\3.22.1` / `cmake\4.1.2` / `cmake\3.30.5` folders (they report
-  `cmake version 3.30.5`) in case you ever script around the NDK issue;
-  they're harmless, but not required on a healthy machine.
+Why cloud: every Google/LLVM-built native Android tool on this laptop
+(`cmake`, `ninja`, NDK `clang`, `llvm-strip`, `aapt2`, …) crashes at launch
+with a stack overflow (exit `0xC00000FD`) on this custom Windows build
+(26200), so the Gradle build cannot complete here. Verified with minimal
+repros (`ninja --version` alone crashes); all four installed NDKs crash.
+The local workaround (in `android/app/build.gradle.kts`, gated by the
+`randil.machineWorkaround` property set in `C:\Users\jerus\.gradle\gradle.properties`)
+makes local configure survive by seeding CMake's compiler-probe results and
+skipping the symbol-strip step. On healthy machines and CI the property is
+unset, so the repo builds as a standard Flutter app.
+
+The app itself also builds for Windows on this laptop for quick live demos
+(`flutter build windows --release` → `build\windows\x64\runner\Release\randil_mobile.exe`).
