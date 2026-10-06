@@ -628,7 +628,9 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 
   Widget _trendCard(List<DailyRoutine> routines) {
-    final days = routines.reversed.take(7).toList();
+    // Newest 7 routine rows, displayed oldest → newest so the week reads
+    // left to right (routines come back date.desc).
+    final days = routines.take(7).toList().reversed.toList();
     final anyValue = days.any((d) => d.net > 0);
     double maxY = 0;
     for (final d in days) {
@@ -806,12 +808,11 @@ class _DashboardScreenState extends State<DashboardScreen>
   /// Full breakdown for one day, opened by tapping a bar in the trend chart.
   void _showDaySheet(DailyRoutine d) {
     final parsed = DateTime.tryParse(d.dateKey);
+    // 'si' DateFormat locale data is never initialised on the phone, so use
+    // the default en_US pattern (readable in both languages) instead.
     final title = parsed == null
         ? d.dateKey
-        : DateFormat(
-            _sinhala ? 'd MMMM yyyy' : 'EEE, d MMM yyyy',
-            _sinhala ? 'si' : 'en_US',
-          ).format(parsed);
+        : DateFormat('EEE, d MMM yyyy').format(parsed);
     final showCosts =
         d.refundsAmt != 0 || d.expensesAmt != 0 || d.wastageAmt != 0;
     showModalBottomSheet<void>(
