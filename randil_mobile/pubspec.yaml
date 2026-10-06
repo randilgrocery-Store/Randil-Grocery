@@ -33,3 +33,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Same brand logo the Windows POS uses (sidebar / login / customer display);
+  # shown on the phone's dashboard + launcher icon.
+  assets:
+    - assets/images/

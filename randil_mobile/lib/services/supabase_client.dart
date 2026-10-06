@@ -28,9 +28,12 @@ class SupabaseClient {
   static const _timeout = Duration(seconds: 20);
 
   /// The shop's daily summaries, newest first.
-  Future<List<DailyRoutine>> fetchRoutines({int limit = 31}) async {
+  ///
+  /// Only the columns the dashboard actually renders are selected instead of
+  /// `*`, which keeps a full phone refresh well under 10 KB.
+  Future<List<DailyRoutine>> fetchRoutines({int limit = 14}) async {
     final uri = Uri.parse('$_base/daily_routines').replace(queryParameters: {
-      'select': '*',
+      'select': _routineColumns,
       'shop_id': 'eq.${CloudConfig.shopId}',
       'order': 'date.desc',
       'limit': '$limit',
@@ -41,15 +44,35 @@ class SupabaseClient {
     ];
   }
 
-  /// The most recent completed bills.
-  Future<List<SaleRow>> fetchRecentSales({int limit = 30}) async {
+  /// The routine columns the dashboard needs. Deliberately narrow: the phone
+  /// never downloads rows it does not paint.
+  static const String _routineColumns =
+      'date,sales_count,gross,discount,net,cash_amt,card_amt,mixed_amt,'
+      'refunds_amt,expenses_amt,wastage_amt,grn_count,grn_value,top_products';
+
+  /// The most recent completed bills — light rows only. The per-item JSON is
+  /// the biggest chunk of every `sales_sync` row, so it is fetched on demand
+  /// in [fetchSaleDetail] only when the owner taps a bill.
+  Future<List<SaleRow>> fetchRecentSales({int limit = 15}) async {
     final uri = Uri.parse('$_base/sales_sync').replace(queryParameters: {
-      'select': '*',
+      'select': 'id,bill_number,amount,payment_method,items_count,timestamp',
       'order': 'timestamp.desc',
       'limit': '$limit',
     });
     final list = await _getList(uri);
     return [for (final row in list) SaleRow.fromJson(row)];
+  }
+
+  /// Everything about one bill (its item lines + cashier). One tiny row,
+  /// fetched only when the owner opens a bill.
+  Future<Map<String, dynamic>?> fetchSaleDetail(String id) async {
+    final uri = Uri.parse('$_base/sales_sync').replace(queryParameters: {
+      'select': 'items_json,cashier',
+      'id': 'eq.$id',
+      'limit': '1',
+    });
+    final list = await _getList(uri);
+    return list.isEmpty ? null : list.first;
   }
 
   /// Releases the underlying HTTP client's pooled connections.

@@ -38,6 +38,15 @@ const Map<String, String> _en = {
   'products': 'items',
   'net': 'Net income',
   'perDay': 'Per day',
+  'weekTotal': 'Week total',
+  'dayDetail': 'Day details',
+  'billDetail': 'Bill details',
+  'qty': 'Qty',
+  'price': 'Price',
+  'cashier': 'Cashier',
+  'grns': 'Goods received',
+  'noSales': 'No sales on this day',
+  'noItems': 'No item details for this bill',
 };
 
 const Map<String, String> _si = {
@@ -74,6 +83,15 @@ const Map<String, String> _si = {
   'products': 'අයිතම',
   'net': 'ශුද්ධ ආදායම',
   'perDay': 'දිනකට',
+  'weekTotal': 'සතියේ එකතුව',
+  'dayDetail': 'දවස් විස්තර',
+  'billDetail': 'බිල්පතේ විස්තර',
+  'qty': 'ප්‍රමාණය',
+  'price': 'මිල',
+  'cashier': 'කැෂියර්',
+  'grns': 'භාණ්ඩ ලැබීම්',
+  'noSales': 'එදින විකුණුම් නොමැත',
+  'noItems': 'මෙම බිල්පතේ භාණ්ඩ විස්තර නොමැත',
 };
 
 const List<String> _dayEnShort = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];

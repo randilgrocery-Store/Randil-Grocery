@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'package:intl/intl.dart';
@@ -26,18 +28,56 @@ class _ShopData {
   final List<SaleRow> sales;
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
+class _DashboardScreenState extends State<DashboardScreen>
+    with WidgetsBindingObserver {
   static const _brandGreen = Color(0xFF00843D);
 
   bool _sinhala = false;
   DateTime? _fetchedAt;
   Future<_ShopData>? _future;
+  Timer? _autoTimer;
+
+  /// How often the dashboard silently refreshes. Each background pull is
+  /// ~10 KB, so even left open all day it stays well inside the free-tier
+  /// Supabase egress budget.
+  static const _autoRefresh = Duration(minutes: 5);
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _restoreLanguage();
     _future = _load();
+    _autoTimer = Timer.periodic(_autoRefresh, (_) => _refreshSilent());
+  }
+
+  @override
+  void dispose() {
+    _autoTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Pull fresh data the moment the owner returns to the app, so they never
+    // have to tap refresh after coming back to the phone.
+    if (state == AppLifecycleState.resumed) {
+      _refreshSilent();
+    }
+  }
+
+  /// Background refresh that only applies when fresh data actually arrives —
+  /// a momentary network blip never blanks the dashboard.
+  Future<void> _refreshSilent() async {
+    try {
+      final data = await _load();
+      if (mounted) {
+        setState(() => _future = Future.value(data));
+      }
+    } catch (_) {
+      // Keep showing the last good data.
+    }
   }
 
   Future<void> _restoreLanguage() async {
@@ -52,8 +92,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final client = SupabaseClient();
     try {
       final results = await Future.wait([
-        client.fetchRoutines(limit: 31),
-        client.fetchRecentSales(limit: 30),
+        client.fetchRoutines(),
+        client.fetchRecentSales(),
       ]);
       _fetchedAt = DateTime.now();
       return _ShopData(
@@ -120,12 +160,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            _brandLogo(size: 56, radius: 16),
+            const SizedBox(height: 14),
             const CircularProgressIndicator(color: _brandGreen),
-            const SizedBox(height: 16),
+            const SizedBox(height: 14),
             Text(tr('loading', sinhala: _sinhala)),
           ],
         ),
       );
+
+  /// The shop's logo in a small white tile — the same treatment the Windows
+  /// POS uses in its sidebar.
+  Widget _brandLogo({required double size, double radius = 8}) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(radius),
+        border: Border.all(color: const Color(0xFFE8EBEF)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      padding: EdgeInsets.all(size * 0.08),
+      child: Image.asset(
+        'assets/images/randil_logo.png',
+        fit: BoxFit.contain,
+        errorBuilder: (_, _, _) => const Icon(Icons.storefront),
+      ),
+    );
+  }
 
   Widget _errorView(Object error) {
     final isNetwork = isNetworkError(error);
@@ -244,6 +307,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         children: [
           Row(
             children: [
+              _brandLogo(size: 34, radius: 9),
+              const SizedBox(width: 10),
               Expanded(
                 child: Text(
                   tr('app', sinhala: _sinhala),
@@ -588,7 +653,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 style: const TextStyle(color: Colors.black45),
               ),
             )
-          else
+          else ...[
             SizedBox(
               height: 180,
               child: BarChart(
@@ -652,11 +717,242 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   gridData: const FlGridData(show: false),
                   borderData: FlBorderData(show: false),
-                  barTouchData: BarTouchData(enabled: true),
+                  barTouchData: BarTouchData(
+                    enabled: true,
+                    touchCallback: (event, response) {
+                      final spot = response?.spot;
+                      if (event is FlTapUpEvent && spot != null) {
+                        final i = spot.touchedBarGroupIndex;
+                        if (i >= 0 && i < days.length) {
+                          _showDaySheet(days[i]);
+                        }
+                      }
+                    },
+                  ),
                 ),
               ),
             ),
-          const SizedBox(height: 10),
+            const SizedBox(height: 10),
+            _weekStrip(days),
+          ],
+          const SizedBox(height: 4),
+        ],
+      ),
+    );
+  }
+
+  /// Compact 7-day totals computed on the phone from the routine rows it
+  /// already downloaded — zero extra egress.
+  Widget _weekStrip(List<DailyRoutine> days) {
+    var net = 0.0;
+    var sales = 0;
+    for (final d in days) {
+      net += d.net;
+      sales += d.salesCount;
+    }
+    final avg = days.isEmpty ? 0.0 : net / days.length;
+    final cells = [
+      (tr('weekTotal', sinhala: _sinhala), _money(net)),
+      (tr('salesCount', sinhala: _sinhala), '$sales'),
+      (tr('perDay', sinhala: _sinhala), _money(avg)),
+    ];
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF2F7F4),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE0EBE5)),
+      ),
+      child: Row(
+        children: [
+          for (var i = 0; i < cells.length; i++) ...[
+            if (i > 0)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 10),
+                child: _VDivider(),
+              ),
+            Expanded(
+              child: Column(
+                children: [
+                  Text(
+                    cells[i].$2,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    cells[i].$1,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.black45,
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Full breakdown for one day, opened by tapping a bar in the trend chart.
+  void _showDaySheet(DailyRoutine d) {
+    final parsed = DateTime.tryParse(d.dateKey);
+    final title = parsed == null
+        ? d.dateKey
+        : DateFormat(
+            _sinhala ? 'd MMMM yyyy' : 'EEE, d MMM yyyy',
+            _sinhala ? 'si' : 'en_US',
+          ).format(parsed);
+    final showCosts =
+        d.refundsAmt != 0 || d.expensesAmt != 0 || d.wastageAmt != 0;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                tr('dayDetail', sinhala: _sinhala),
+                style: const TextStyle(color: Colors.black54, fontSize: 12),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              if (d.salesCount == 0) ...[
+                const SizedBox(height: 10),
+                Text(
+                  tr('noSales', sinhala: _sinhala),
+                  style: const TextStyle(color: Colors.black45),
+                ),
+              ],
+              const SizedBox(height: 14),
+              _detailRow(
+                tr('salesCount', sinhala: _sinhala),
+                '${d.salesCount}',
+                bold: true,
+              ),
+              _detailRow(tr('gross', sinhala: _sinhala), _money(d.gross)),
+              _detailRow(tr('discount', sinhala: _sinhala), _money(d.discount)),
+              _detailRow(
+                tr('net', sinhala: _sinhala),
+                _money(d.net),
+                bold: true,
+                accent: true,
+              ),
+              _detailRow(tr('cash', sinhala: _sinhala), _money(d.cashAmt)),
+              _detailRow(tr('card', sinhala: _sinhala), _money(d.cardAmt)),
+              _detailRow(tr('mixed', sinhala: _sinhala), _money(d.mixedAmt)),
+              if (showCosts) ...[
+                _detailRow(
+                  tr('refunds', sinhala: _sinhala),
+                  _money(d.refundsAmt),
+                  red: true,
+                ),
+                _detailRow(
+                  tr('expenses', sinhala: _sinhala),
+                  _money(d.expensesAmt),
+                  red: true,
+                ),
+                _detailRow(
+                  tr('wastage', sinhala: _sinhala),
+                  _money(d.wastageAmt),
+                  red: true,
+                ),
+              ],
+              if (d.grnCount > 0)
+                _detailRow(
+                  '${tr('grns', sinhala: _sinhala)} ($d.grnCount)',
+                  _money(d.grnValue),
+                ),
+              if (d.topProducts.isNotEmpty) ...[
+                const Divider(height: 24),
+                Text(
+                  tr('topProducts', sinhala: _sinhala),
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                for (var i = 0; i < d.topProducts.length && i < 5; i++)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            d.topProducts[i].name,
+                            style: const TextStyle(color: Colors.black87),
+                          ),
+                        ),
+                        Text(
+                          d.topProducts[i].qty % 1 == 0
+                              ? d.topProducts[i].qty.toStringAsFixed(0)
+                              : d.topProducts[i].qty.toStringAsFixed(2),
+                          style: const TextStyle(
+                            color: _brandGreen,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _detailRow(
+    String label,
+    String value, {
+    bool bold = false,
+    bool accent = false,
+    bool red = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(label, style: const TextStyle(color: Colors.black54)),
+          ),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
+              color: red
+                  ? const Color(0xFFD32F2F)
+                  : accent
+                      ? _brandGreen
+                      : Colors.black87,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
         ],
       ),
     );
@@ -685,46 +981,56 @@ class _DashboardScreenState extends State<DashboardScreen> {
             )
           else
             for (final s in shown)
-              Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Row(
-                  children: [
-                    Icon(Icons.receipt_long, size: 20, color: _brandGreen),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            s.billNumber.isEmpty ? s.id : '#${s.billNumber}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.black87,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13,
+              InkWell(
+                onTap: () => _showBillSheet(s),
+                borderRadius: BorderRadius.circular(12),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Row(
+                    children: [
+                      Icon(Icons.receipt_long, size: 20, color: _brandGreen),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              s.billNumber.isEmpty ? s.id : '#${s.billNumber}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.black87,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
+                              ),
                             ),
-                          ),
-                          Text(
-                            _billTime(s),
-                            style: const TextStyle(
-                              color: Colors.black45,
-                              fontSize: 11,
+                            Text(
+                              _billTime(s),
+                              style: const TextStyle(
+                                color: Colors.black45,
+                                fontSize: 11,
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
-                    Text(
-                      _money(s.amount),
-                      style: const TextStyle(
-                        color: Colors.black87,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 13,
+                      Text(
+                        _money(s.amount),
+                        style: const TextStyle(
+                          color: Colors.black87,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                        ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 4),
+                      const Icon(
+                        Icons.chevron_right,
+                        size: 18,
+                        color: Colors.black26,
+                      ),
+                    ],
+                  ),
                 ),
               ),
           const SizedBox(height: 8),
@@ -742,6 +1048,171 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final hh = '${local.day.toString().padLeft(2, '0')}/'
         '${local.month.toString().padLeft(2, '0')}';
     return '$hh $hm · ${s.paymentMethod}';
+  }
+
+  String _n(double v) => NumberFormat('#,##0.00', 'en_US').format(v);
+
+  /// Itemised view of one bill (items + cashier). The per-line JSON is only
+  /// fetched when this sheet opens, keeping the recent-bills refresh light.
+  void _showBillSheet(SaleRow s) {
+    final client = SupabaseClient();
+    final detail = client.fetchSaleDetail(s.id).whenComplete(client.close);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.white,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
+          child: FutureBuilder<Map<String, dynamic>?>(
+            future: detail,
+            builder: (context, snapshot) {
+              final detailRow = snapshot.data;
+              final cashier =
+                  detailRow == null ? '' : '${detailRow['cashier'] ?? ''}'.trim();
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    tr('billDetail', sinhala: _sinhala),
+                    style: const TextStyle(color: Colors.black54, fontSize: 12),
+                  ),
+                  const SizedBox(height: 2),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          s.billNumber.isEmpty ? s.id : '#${s.billNumber}',
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        _money(s.amount),
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: _brandGreen,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _billTime(s),
+                    style: const TextStyle(color: Colors.black45, fontSize: 12),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '${s.itemsCount} ${tr('products', sinhala: _sinhala)}',
+                    style: const TextStyle(
+                      color: Colors.black54,
+                      fontSize: 12,
+                    ),
+                  ),
+                  if (snapshot.connectionState == ConnectionState.waiting)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Center(
+                        child: CircularProgressIndicator(color: _brandGreen),
+                      ),
+                    )
+                  else if (snapshot.hasError)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      child: Text(
+                        tr('errorMsg', sinhala: _sinhala),
+                        style: const TextStyle(
+                          color: Colors.black45,
+                          fontSize: 12,
+                        ),
+                      ),
+                    )
+                  else ...[
+                    if (cashier.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      _detailRow(
+                        tr('cashier', sinhala: _sinhala),
+                        cashier,
+                      ),
+                    ],
+                    const Divider(height: 24),
+                    ..._billItemRows(detailRow),
+                  ],
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _billItemRows(Map<String, dynamic>? row) {
+    final items = row == null
+        ? const <SaleItem>[]
+        : decodeItems('${row['items_json'] ?? ''}');
+    if (items.isEmpty) {
+      return [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Text(
+            tr('noItems', sinhala: _sinhala),
+            style: const TextStyle(color: Colors.black45, fontSize: 12),
+          ),
+        ),
+      ];
+    }
+    return [
+      for (final it in items)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          child: Row(
+            children: [
+              Expanded(
+                flex: 3,
+                child: Text(
+                  it.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              Expanded(
+                flex: 2,
+                child: Text(
+                  '${it.qty % 1 == 0 ? it.qty.toStringAsFixed(0) : it.qty.toStringAsFixed(2)} × ${_n(it.price)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(color: Colors.black54, fontSize: 12),
+                ),
+              ),
+              SizedBox(
+                width: 86,
+                child: Text(
+                  _money(it.lineTotal),
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+    ];
   }
 
   Widget _card({required Widget child, EdgeInsets? padding}) {
@@ -763,4 +1234,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: child,
     );
   }
+}
+
+/// Thin vertical divider used inside the week-totals strip of the trend card.
+class _VDivider extends StatelessWidget {
+  const _VDivider();
+
+  @override
+  Widget build(BuildContext context) =>
+      Container(width: 1, height: 26, color: const Color(0xFFDDE7E1));
 }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the near-white background of the Randil desktop logo, so the
+         adaptive icon's white foreground blends into a seamless tile. -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+</resources>
