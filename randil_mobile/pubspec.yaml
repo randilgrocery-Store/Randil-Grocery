@@ -1,0 +1,35 @@
+name: randil_mobile
+description: "Randil Grocery Shop - owner's daily income viewer. Reads the shop's real daily summaries from Supabase (no login)."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # Supabase REST calls (the shop uses the anon key, same as the POS)
+  http: ^1.2.0
+
+  # Income trend chart
+  fl_chart: ^0.70.0
+
+  # Number / date formatting
+  intl: ^0.19.0
+
+  # Persist the EN / Sinhala language choice on the phone
+  shared_preferences: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
