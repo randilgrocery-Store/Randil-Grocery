@@ -162,23 +162,25 @@ class _AppDataTableState<T> extends State<AppDataTable<T>> {
     final rows = _sortedRows;
 
     if (widget.rows.isEmpty) {
-      return Expanded(
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(widget.emptyIcon,
-                  size: 34, color: colors.textTertiary),
+      // No Expanded wrapper here: the table can be embedded under an outer
+      // Expanded (Recent Bills on the dashboard) and nested Expanded widgets
+      // throw "Incorrect use of ParentDataWidget". A plain Center expands to
+      // fill whatever box the host provides, so the empty state stays centered.
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(widget.emptyIcon,
+                size: 34, color: colors.textTertiary),
+            const SizedBox(height: AppSpacing.sm),
+            Text(widget.emptyTitle, style: context.typography.h3),
+            const SizedBox(height: AppSpacing.xxs),
+            Text(widget.emptyMessage, style: context.typography.caption),
+            if (widget.emptyAction != null) ...[
               const SizedBox(height: AppSpacing.sm),
-              Text(widget.emptyTitle, style: context.typography.h3),
-              const SizedBox(height: AppSpacing.xxs),
-              Text(widget.emptyMessage, style: context.typography.caption),
-              if (widget.emptyAction != null) ...[
-                const SizedBox(height: AppSpacing.sm),
-                widget.emptyAction!,
-              ],
+              widget.emptyAction!,
             ],
-          ),
+          ],
         ),
       );
     }

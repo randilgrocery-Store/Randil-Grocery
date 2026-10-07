@@ -148,6 +148,12 @@ class _HomeScreenState extends State<HomeScreen>
     final customerProvider = context.read<CustomerProvider>();
     final reportProvider = context.read<ReportsProvider>();
 
+    // Yield OUT of the build/layout phase before any provider notifies: the
+    // loaders call notifyListeners() synchronously when they start, and
+    // notifying while the framework is mid-build throws "setState() called
+    // during build" (blanked the home/dashboard on entry).
+    await Future<void>.microtask(() {});
+
     // Reload the grid/selectors whenever the LAN catalog sync refreshes data.
     final networkProvider = context.read<NetworkProvider>();
     networkProvider.onCatalogSynced = () {

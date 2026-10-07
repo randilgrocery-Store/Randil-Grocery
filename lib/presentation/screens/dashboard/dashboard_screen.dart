@@ -90,7 +90,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     // the KPI row listens to them directly instead of using context.watch.
     _currentPl.addListener(_onPlChanged);
     _prevPl.addListener(_onPlChanged);
-    unawaited(_refresh(silent: true));
+    // Load providers OUTSIDE the build/layout phase. The loaders call
+    // notifyListeners() synchronously when they start, and notifying while the
+    // framework is mid-build throws "setState() called during build" — which
+    // blanked the dashboard on entry. A post-frame callback runs after paint.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_refresh(silent: true));
+      }
+    });
   }
 
   @override
@@ -1063,12 +1071,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
       Expanded(flex: 2, child: _buildRecentBills()),
       Expanded(
         flex: 1,
+        // NOT Expanded/Expanded: this Column lives inside a horizontal
+        // _rowOrStack row with unbounded height (dashboard scrolls), so flex
+        // children would throw "non-zero flex with unbounded constraints".
+        // Self-sized cards fill the cell without the crash.
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(child: _buildPaymentMethods()),
+            _buildPaymentMethods(),
             const SizedBox(height: AppSpacing.gutter),
-            Expanded(child: _buildCashierLeaderboard()),
+            _buildCashierLeaderboard(),
           ],
         ),
       ),
@@ -1076,101 +1088,109 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildRecentBills() {
-    return AppCard(
-      padding: EdgeInsets.zero,
-      clipContent: true,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: AppSpacing.md,
-              vertical: AppSpacing.sm,
+    // AppDataTable uses Expanded + ListView internally, so it needs a BOUNDED
+    // height. The dashboard scrolls, so pin the card to 440px and let the
+    // bill list scroll inside its own card instead of crashing the row.
+    return SizedBox(
+      height: 440,
+      child: AppCard(
+        padding: EdgeInsets.zero,
+        clipContent: true,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.md,
+                vertical: AppSpacing.sm,
+              ),
+              child: AppSectionHeader(
+                title: 'Recent bills',
+                subtitle: 'Latest transactions',
+                icon: Icons.receipt_long_outlined,
+                dense: true,
+                action: widget.onNavigateToReports == null
+                    ? null
+                    : TextButton(
+                        onPressed: widget.onNavigateToReports,
+                        child: const Text('View all'),
+                      ),
+              ),
             ),
-            child: AppSectionHeader(
-              title: 'Recent bills',
-              subtitle: 'Latest transactions',
-              icon: Icons.receipt_long_outlined,
-              dense: true,
-              action: widget.onNavigateToReports == null
-                  ? null
-                  : TextButton(
-                      onPressed: widget.onNavigateToReports,
-                      child: const Text('View all'),
-                    ),
-            ),
-          ),
-          _salesPane(
-            future: _salesFuture,
-            skeletonHeight: 320,
-            builder: (context, sales) {
-              final rows = [...sales]
-                ..sort((a, b) => b.saleDate.compareTo(a.saleDate));
+            Expanded(
+              child: _salesPane(
+                future: _salesFuture,
+                skeletonHeight: 320,
+                builder: (context, sales) {
+                  final rows = [...sales]
+                    ..sort((a, b) => b.saleDate.compareTo(a.saleDate));
 
-              return AppDataTable<Sale>(
-                columns: [
-                  AppTableColumn(
-                    label: 'Invoice',
-                    id: 'invoice',
-                    builder: (c, s, i) => Text(
-                      s.invoiceLabel,
-                      style: c.typography.bodyStrong,
-                    ),
-                  ),
-                  AppTableColumn(
-                    label: 'Time',
-                    id: 'time',
-                    builder: (c, s, i) =>
-                        Text(_timeOf(s.saleDate), style: c.typography.caption),
-                  ),
-                  AppTableColumn(
-                    label: 'Cashier',
-                    id: 'cashier',
-                    builder: (c, s, i) => Text(
-                      s.cashierName.isEmpty ? '—' : s.cashierName,
-                      style: c.typography.body,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  AppTableColumn(
-                    label: 'Items',
-                    id: 'items',
-                    numeric: true,
-                    builder: (c, s, i) => Text(
-                      AppMoney.integer(
-                          s.items.fold(0.0, (sum, it) => sum + it.quantity)),
-                      style: c.typography.numberTable,
-                    ),
-                  ),
-                  AppTableColumn(
-                    label: 'Total',
-                    id: 'total',
-                    numeric: true,
-                    builder: (c, s, i) => Text(
-                      AppMoney.format(s.totalAmount),
-                      style: c.typography.numberTable,
-                    ),
-                  ),
-                  AppTableColumn(
-                    label: 'Payment',
-                    id: 'payment',
-                    builder: (c, s, i) =>
-                        StatusBadge(label: _paymentLabel(s), dense: true),
-                  ),
-                ],
-                rows: rows.take(8).toList(),
-                sortBy: 'time',
-                sortDescending: true,
-                striped: true,
-                emptyIcon: Icons.receipt_long_outlined,
-                emptyTitle: 'No bills yet',
-                emptyMessage:
-                    'Bills recorded in ${_range.fullLabel} will appear here.',
-              );
-            },
-          ),
-        ],
+                  return AppDataTable<Sale>(
+                    columns: [
+                      AppTableColumn(
+                        label: 'Invoice',
+                        id: 'invoice',
+                        builder: (c, s, i) => Text(
+                          s.invoiceLabel,
+                          style: c.typography.bodyStrong,
+                        ),
+                      ),
+                      AppTableColumn(
+                        label: 'Time',
+                        id: 'time',
+                        builder: (c, s, i) =>
+                            Text(_timeOf(s.saleDate), style: c.typography.caption),
+                      ),
+                      AppTableColumn(
+                        label: 'Cashier',
+                        id: 'cashier',
+                        builder: (c, s, i) => Text(
+                          s.cashierName.isEmpty ? '—' : s.cashierName,
+                          style: c.typography.body,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      AppTableColumn(
+                        label: 'Items',
+                        id: 'items',
+                        numeric: true,
+                        builder: (c, s, i) => Text(
+                          AppMoney.integer(
+                              s.items.fold(0.0, (sum, it) => sum + it.quantity)),
+                          style: c.typography.numberTable,
+                        ),
+                      ),
+                      AppTableColumn(
+                        label: 'Total',
+                        id: 'total',
+                        numeric: true,
+                        builder: (c, s, i) => Text(
+                          AppMoney.format(s.totalAmount),
+                          style: c.typography.numberTable,
+                        ),
+                      ),
+                      AppTableColumn(
+                        label: 'Payment',
+                        id: 'payment',
+                        builder: (c, s, i) =>
+                            StatusBadge(label: _paymentLabel(s), dense: true),
+                      ),
+                    ],
+                    rows: rows.take(8).toList(),
+                    sortBy: 'time',
+                    sortDescending: true,
+                    striped: true,
+                    emptyIcon: Icons.receipt_long_outlined,
+                    emptyTitle: 'No bills yet',
+                    emptyMessage:
+                        'Bills recorded in ${_range.fullLabel} will appear here.',
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
