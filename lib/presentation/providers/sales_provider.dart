@@ -32,7 +32,7 @@ class SalesProvider extends ChangeNotifier {
 
   /// Adds a product to the cart, resolving the price from the oldest stock
   /// batch (FIFO) so goods bought at an older price are sold at that price.
-  Future<void> addToCart(Product product, {int quantity = 1}) async {
+  Future<void> addToCart(Product product, {double quantity = 1}) async {
     if (product.quantity <= 0) {
       return; // Don't add out of stock items
     }
@@ -41,18 +41,19 @@ class SalesProvider extends ChangeNotifier {
       (item) => item.product.id == product.id,
     );
 
-    final int desiredQuantity;
+    final double desiredQuantity;
     if (existingIndex >= 0) {
       final updated = _cartItems[existingIndex];
       final maxAddable = product.quantity - updated.quantity;
       if (maxAddable <= 0) {
         return;
       }
-      final add = quantity.clamp(1, maxAddable).toInt();
+      final add = quantity.clamp(0.0, maxAddable);
       updated.quantity += add;
       desiredQuantity = updated.quantity;
     } else {
-      desiredQuantity = quantity.clamp(1, product.quantity).toInt();
+      desiredQuantity = quantity.clamp(0.0, product.quantity);
+      if (desiredQuantity <= 0) return;
       _cartItems.add(
         CartItem(
           id: product.id,
@@ -84,7 +85,7 @@ class SalesProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> updateCartItemQuantity(String productId, int quantity) async {
+  Future<void> updateCartItemQuantity(String productId, double quantity) async {
     final index = _cartItems.indexWhere((item) => item.product.id == productId);
     if (index < 0) {
       return;
@@ -96,7 +97,7 @@ class SalesProvider extends ChangeNotifier {
     }
 
     final item = _cartItems[index];
-    final validQuantity = quantity.clamp(1, item.product.quantity).toInt();
+    final validQuantity = quantity.clamp(0.0, item.product.quantity);
     item.quantity = validQuantity;
 
     try {
@@ -181,6 +182,10 @@ class SalesProvider extends ChangeNotifier {
     required double amountReceived,
     required String paymentMethod,
     String notes = '',
+    String customerName = '',
+    String customerPhone = '',
+    double cashAmount = 0,
+    double cardAmount = 0,
   }) async {
     if (_cartItems.isEmpty) {
       return false;
@@ -220,6 +225,10 @@ class SalesProvider extends ChangeNotifier {
         balance: amountReceived - total,
         paymentMethod: paymentMethod,
         notes: notes,
+        customerName: customerName,
+        customerPhone: customerPhone,
+        cashAmount: cashAmount,
+        cardAmount: cardAmount,
       );
 
       // Save the sale and deduct stock (FIFO) atomically.
@@ -234,8 +243,9 @@ class SalesProvider extends ChangeNotifier {
       // Push to the cloud so the Randil Grocery POS phone app sees it live.
       unawaited(SupabaseSyncService.instance.onSaleCompleted(sale));
 
-      // Every change is kept on the local machine immediately.
-      unawaited(DatabaseService().createDbSnapshot());
+      // Saving the bill already queued a full safety backup: a copy of the
+      // database is written to the temp folder at once and then pushed to
+      // Google Drive and GitHub in the background.
 
       clearCart();
 

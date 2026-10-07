@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../models/sale.dart';
 import '../models/shop_settings.dart';
 import 'windows_printer_service.dart';
+import '../../core/utils/money_calculator.dart';
 
 class PrintService {
   factory PrintService() => _instance;
@@ -134,10 +135,7 @@ class PrintService {
     final cols = _charsForPaperWidth(settings.paperWidth);
     final symbol = settings.currencySymbol;
 
-    final taxAmount = settings.enableTax && settings.taxPercentage > 0
-        ? (sale.totalAmount * settings.taxPercentage) / 100
-        : 0.0;
-    final qty = sale.items.fold<int>(0, (sum, item) => sum + item.quantity);
+    final qty = sale.items.fold<double>(0, (sum, item) => sum + item.quantity);
     final layout = _itemLayout(cols);
 
     // ---- Header ----
@@ -158,6 +156,12 @@ class PrintService {
     buffer.writeln(_pair('Invoice', sale.invoiceLabel, cols));
     buffer.writeln(_pair('Date', dateFormat.format(sale.saleDate), cols));
     buffer.writeln(_pair('Cashier', sale.cashierName, cols));
+    if (sale.customerName.isNotEmpty) {
+      buffer.writeln(_pair('Customer', sale.customerName, cols));
+      if (sale.customerPhone.isNotEmpty) {
+        buffer.writeln(_pair('Cust. Phone', sale.customerPhone, cols));
+      }
+    }
     buffer.writeln(_pair('Payment', sale.paymentMethod, cols));
     if (sale.notes.trim().isNotEmpty) {
       buffer.writeln(_pair('Notes', sale.notes.trim(), cols));
@@ -199,19 +203,22 @@ class PrintService {
       buffer.writeln(_pair(
           'Discount', '-${_formatCurrency(sale.totalDiscount, symbol)}', cols));
     }
-    if (taxAmount > 0) {
-      buffer.writeln(_pair('Tax (${settings.taxPercentage}%)',
-          _formatCurrency(taxAmount, symbol), cols));
-    }
     buffer.writeln(_repeat('=', cols));
     buffer.writeln(
         _pair('TOTAL', _formatCurrency(sale.totalAmount, symbol), cols));
+    if (sale.isSplitPayment) {
+      buffer.writeln(_pair(
+          'Cash Paid', _formatCurrency(sale.cashAmount, symbol), cols));
+      buffer.writeln(_pair(
+          'Card Paid', _formatCurrency(sale.cardAmount, symbol), cols));
+    }
     buffer.writeln(
         _pair('Paid', _formatCurrency(sale.amountReceived, symbol), cols));
     buffer.writeln(
         _pair('Change', _formatCurrency(sale.balance, symbol), cols));
     buffer.writeln(_repeat('=', cols));
-    buffer.writeln(_pair('Items / Qty', '${sale.items.length} / $qty', cols));
+    buffer.writeln(_pair(
+        'Items / Qty', '${sale.items.length} / ${MoneyCalculator.formatQty(qty)}', cols));
 
     // ---- Footer ----
     if (includeBreaks) {
@@ -326,6 +333,12 @@ class PrintService {
     aligned(_pair(
         'Date', DateFormat('yyyy-MM-dd HH:mm:ss').format(sale.saleDate), cols));
     aligned(_pair('Cashier', sale.cashierName, cols));
+    if (sale.customerName.isNotEmpty) {
+      aligned(_pair('Customer', sale.customerName, cols));
+      if (sale.customerPhone.isNotEmpty) {
+        aligned(_pair('Cust. Phone', sale.customerPhone, cols));
+      }
+    }
     aligned(_pair('Payment', sale.paymentMethod, cols));
     if (sale.notes.trim().isNotEmpty) {
       aligned(_pair('Notes', sale.notes.trim(), cols));
@@ -362,27 +375,27 @@ class PrintService {
     aligned(_repeat('-', cols));
 
     // ---- Totals ----
-    final tax = settings.enableTax && settings.taxPercentage > 0
-        ? (sale.totalAmount * settings.taxPercentage) / 100
-        : 0.0;
-    final qty = sale.items.fold<int>(0, (sum, item) => sum + item.quantity);
+    final qty = sale.items.fold<double>(0, (sum, item) => sum + item.quantity);
 
     aligned(_pair('Subtotal', _formatCurrency(sale.subtotal, symbol), cols));
     if (sale.totalDiscount > 0) {
       aligned(_pair(
           'Discount', '-${_formatCurrency(sale.totalDiscount, symbol)}', cols));
     }
-    if (tax > 0) {
-      aligned(_pair('Tax (${settings.taxPercentage}%)',
-          _formatCurrency(tax, symbol), cols));
-    }
     aligned(_repeat('=', cols));
     big('TOTAL  ${_formatCurrency(sale.totalAmount, symbol)}');
     aligned(_repeat('=', cols));
+    if (sale.isSplitPayment) {
+      aligned(_pair(
+          'Cash Paid', _formatCurrency(sale.cashAmount, symbol), cols));
+      aligned(_pair(
+          'Card Paid', _formatCurrency(sale.cardAmount, symbol), cols));
+    }
     aligned(_pair('Paid', _formatCurrency(sale.amountReceived, symbol), cols));
     aligned(_pair('Change', _formatCurrency(sale.balance, symbol), cols));
     aligned(_repeat('=', cols));
-    aligned(_pair('Items / Qty', '${sale.items.length} / $qty', cols));
+    aligned(_pair(
+        'Items / Qty', '${sale.items.length} / ${MoneyCalculator.formatQty(qty)}', cols));
 
     // ---- Footer ----
     aligned(_repeat('-', cols));
@@ -394,7 +407,9 @@ class PrintService {
     alignedSmall('Tel: $developerPhone');
     alignedSmall(developerEmail);
 
-    // Feed + cut paper (GS V 66 n: full cut)
+    // Kick the cash drawer (ESC p 0 <t1> <t2>), then feed + cut paper.
+    // Standard for TYSSO/EPSON-style drawers wired through the printer.
+    commands.addAll([esc, 0x70, 0x00, 0x32, 0xFA]); // drawer kick pulse
     commands.addAll([esc, 0x64, 0x03]); // 3 line feeds
     commands.addAll([gs, 0x56, 0x42, 0x00]); // full cut
 
@@ -542,7 +557,7 @@ class PrintService {
 
   /// Build the fixed-width item column layout for the given line width.
   _ItemLayout _itemLayout(int cols) {
-    const qtyW = 4;
+    const qtyW = 6;
     const rateW = 9;
     const amtW = 11;
     final nameW = (cols - qtyW - rateW - amtW - 3).clamp(8, cols).toInt();
@@ -650,6 +665,7 @@ class PrintService {
         <div class="receipt-id">Invoice: ${sale.invoiceLabel}</div>
         <div class="date">Date: ${dateFormat.format(sale.saleDate)}</div>
         <div class="cashier">Cashier: ${sale.cashierName}</div>
+        ${sale.customerName.isNotEmpty ? '<div class="cashier">Customer: ${sale.customerName}${sale.customerPhone.isNotEmpty ? ' &middot; ${sale.customerPhone}' : ''}</div>' : ''}
 
         <table class="items-table">
           <thead>
@@ -663,7 +679,7 @@ class PrintService {
             ${sale.items.map((item) => '''
               <tr>
                 <td class="item-name">${item.productName}</td>
-                <td class="item-qty">${item.quantity}</td>
+                <td class="item-qty">${MoneyCalculator.formatQty(item.quantity)}</td>
                 <td class="item-price">${settings.currencySymbol} ${item.total.toStringAsFixed(2)}</td>
               </tr>
               ${item.discount > 0 ? '<tr><td colspan="3"><small>Discount: -${settings.currencySymbol} ${item.discountAmount.toStringAsFixed(2)}</small></td></tr>' : ''}
@@ -686,6 +702,16 @@ class PrintService {
             <span>TOTAL</span>
             <span>${settings.currencySymbol} ${sale.totalAmount.toStringAsFixed(2)}</span>
           </div>
+          ${sale.isSplitPayment ? '''
+            <div class="total-row">
+              <span>Cash Paid</span>
+              <span>${settings.currencySymbol} ${sale.cashAmount.toStringAsFixed(2)}</span>
+            </div>
+            <div class="total-row">
+              <span>Card Paid</span>
+              <span>${settings.currencySymbol} ${sale.cardAmount.toStringAsFixed(2)}</span>
+            </div>
+          ''' : ''}
           <div class="total-row">
             <span>Amount Received</span>
             <span>${settings.currencySymbol} ${sale.amountReceived.toStringAsFixed(2)}</span>
@@ -732,13 +758,13 @@ class _ItemLayout {
     return buf.toString();
   }
 
-  String row(String name, int qty, String rate, String amount) {
+  String row(String name, double qty, String rate, String amount) {
     final n = name.length > nameW
         ? name.substring(0, nameW)
         : name.padRight(nameW);
     final buf = StringBuffer()
       ..write(n)
-      ..write(qty.toString().padLeft(qtyW))
+      ..write(MoneyCalculator.formatQty(qty).padLeft(qtyW))
       ..write(' ')
       ..write(rate.padLeft(rateW))
       ..write(' ')
@@ -749,7 +775,7 @@ class _ItemLayout {
   /// One or more aligned lines for an item. Long names wrap onto the next
   /// line(s); the quantity/rate/amount always print on the final line so the
   /// columns stay lined up.
-  List<String> lines(String name, int qty, String rate, String amount) {
+  List<String> lines(String name, double qty, String rate, String amount) {
     final clean = name.trim();
     if (clean.length <= nameW) {
       return [row(clean, qty, rate, amount)];

@@ -69,8 +69,21 @@ class MoneyCalculator {
     return (profit / paise) * 100;
   }
 
-  /// Calculate amount for multiple items
-  static double calculateItemAmount(double unitPrice, int quantity) => fromPaise(toPaise(unitPrice) * quantity);
+  /// Calculate amount for a line (supports fractional/weighted quantities)
+  static double calculateItemAmount(double unitPrice, double quantity) => fromPaise((toPaise(unitPrice) * quantity).round());
+
+  /// Format a quantity for display: whole numbers print without decimals
+  /// ('5'), weighed amounts print with up to 3 decimals ('0.500' -> '0.5').
+  static String formatQty(double qty, {bool byWeight = false}) {
+    if (byWeight) {
+      final s = qty.toStringAsFixed(3);
+      final trimmed = s.contains('.')
+          ? s.replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '')
+          : s;
+      return trimmed;
+    }
+    return qty % 1 == 0 ? qty.toInt().toString() : qty.toStringAsFixed(2);
+  }
 
   /// Validate if payment is sufficient
   static bool isPaymentSufficient(double paid, double required) => toPaise(paid) >= toPaise(required);

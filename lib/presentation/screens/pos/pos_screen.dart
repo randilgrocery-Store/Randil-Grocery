@@ -11,6 +11,7 @@ import '../../../core/utils/money_calculator.dart';
 import '../../../data/services/print_service.dart';
 import '../../../data/services/sound_service.dart';
 import '../../providers/auth_provider.dart';
+import '../../providers/cash_drawer_coordinator.dart';
 import '../../providers/category_provider.dart';
 import '../../providers/customer_provider.dart';
 import '../../providers/payment_provider.dart';
@@ -56,7 +57,6 @@ class _PosScreenState extends State<PosScreen> {
   String? _selectedCustomerId;
   String? _selectedCategory;
   bool _isFullScreen = false;
-  bool _redeemPoints = false;
 
   bool _handleGlobalKey(KeyEvent event) {
     if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.f11) {
@@ -179,7 +179,20 @@ class _PosScreenState extends State<PosScreen> {
     final product = await productProvider.getProductByCode(barcode);
 
     if (product != null && product.quantity > 0) {
-      await context.read<SalesProvider>().addToCart(product);
+      if (product.soldByWeight) {
+        final weight = await _promptWeight(product);
+        if (weight == null) {
+          _searchController.clear();
+          _filterProducts();
+          _focusBarcode();
+          return;
+        }
+        await context
+            .read<SalesProvider>()
+            .addToCart(product, quantity: weight);
+      } else {
+        await context.read<SalesProvider>().addToCart(product);
+      }
       await SoundService.playBeep();
       _showSnackBar('${product.name} added to cart', isSuccess: true);
     } else {
@@ -223,16 +236,6 @@ class _PosScreenState extends State<PosScreen> {
         ? customerProvider.getCustomerById(_selectedCustomerId!)
         : null;
     final method = paymentProvider.selectedPaymentMethod;
-
-    // Apply loyalty points redemption as a discount (1 pt = Rs. 1).
-    int redeemedPoints = 0;
-    if (_redeemPoints && customer != null && customer.loyaltyPoints > 0) {
-      redeemedPoints =
-          customer.loyaltyPoints.clamp(0, salesProvider.total.floor()).toInt();
-      if (redeemedPoints > 0) {
-        salesProvider.applyCustomDiscount(redeemedPoints.toDouble());
-      }
-    }
 
     // Validate the payment, using the post-redemption total.
     double paymentAmount;
@@ -314,6 +317,10 @@ class _PosScreenState extends State<PosScreen> {
         amountReceived: paymentAmount,
         paymentMethod: paymentMethod,
         notes: paymentNotes,
+        customerName: customer?.name ?? '',
+        customerPhone: customer?.phone ?? '',
+        cashAmount: cashAmount,
+        cardAmount: cardAmount,
       );
 
       if (!ok) {
@@ -328,14 +335,9 @@ class _PosScreenState extends State<PosScreen> {
       if (!mounted) return;
 
       if (customer != null) {
-        final pointsEarned = (saleTotal / 100).floor();
-        await customerProvider.updateCustomerCreditAndLoyalty(
+        await customerProvider.updateCustomerPurchaseStats(
           customerId: customer.id,
           amountSpent: saleTotal,
-          amountReceived: paymentAmount,
-          creditApplied: 0,
-          redeemedPoints: redeemedPoints,
-          pointsEarned: pointsEarned,
         );
       }
 
@@ -396,59 +398,111 @@ class _PosScreenState extends State<PosScreen> {
     setState(() {
       _selectedCustomerId = null;
       _selectedCategory = null;
-      _redeemPoints = false;
     });
     context.read<SalesProvider>().clearCart();
     _focusBarcode();
   }
 
+  /// Small toast shown as an overlay at the top-right of the screen (over
+  /// the cart column) instead of a bottom snackbar.
   void _showSnackBar(String message, {bool isSuccess = false}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor:
-            isSuccess ? PosAppTheme.successGreen : PosAppTheme.dangerRed,
-        duration: const Duration(seconds: 2),
+    final overlay = Overlay.of(context);
+    late final OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => _PosToast(
+        message: message,
+        isSuccess: isSuccess,
       ),
     );
+    overlay.insert(entry);
+    Timer(const Duration(seconds: 3), () {
+      if (entry.mounted) entry.remove();
+    });
   }
 
-  // ignore: unused_element
-  Future<void> _showCustomDiscountDialog() async {
-    final result = await showDialog<double>(
+  /// Bill discount dialog — accepts either an exact percentage or an exact
+  /// rupee amount via a segmented toggle.
+  Future<void> _showDiscountDialog() async {
+    bool isPercent = true;
+    final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Enter Discount Percentage'),
-        content: TextField(
-          controller: _customDiscountController,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(
-            hintText: 'Enter percentage (0-100)',
-            prefixText: '%',
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Bill Discount'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment<bool>(
+                    value: true,
+                    label: Text('Percent'),
+                    icon: Icon(Icons.percent, size: 18),
+                  ),
+                  ButtonSegment<bool>(
+                    value: false,
+                    label: Text('Amount (Rs)'),
+                    icon: Icon(Icons.payments_outlined, size: 18),
+                  ),
+                ],
+                selected: {isPercent},
+                onSelectionChanged: (selection) {
+                  setDialogState(() => isPercent = selection.first);
+                },
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _customDiscountController,
+                autofocus: true,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: isPercent
+                      ? 'Discount percentage (0-100)'
+                      : 'Discount amount',
+                  prefixText: isPercent ? '% ' : 'Rs ',
+                  border: const OutlineInputBorder(),
+                ),
+                onSubmitted: (_) => Navigator.pop(context, true),
+              ),
+            ],
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Apply'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              final value = double.tryParse(_customDiscountController.text);
-              if (value != null && value >= 0 && value <= 100) {
-                Navigator.pop(context, value);
-                _customDiscountController.clear();
-              }
-            },
-            child: const Text('Apply'),
-          ),
-        ],
       ),
     );
 
-    if (result != null) {
-      context.read<SalesProvider>().applyQuickDiscount(result);
+    if (confirmed != true || !mounted) return;
+    final value = double.tryParse(_customDiscountController.text) ?? -1;
+    _customDiscountController.clear();
+    final sales = context.read<SalesProvider>();
+    if (isPercent) {
+      if (value >= 0 && value <= 100) {
+        sales.applyQuickDiscount(value);
+        _showSnackBar('Discount ${value.toStringAsFixed(1)}% applied',
+            isSuccess: true);
+      } else {
+        _showSnackBar('Enter a percentage between 0 and 100');
+      }
+    } else {
+      if (value >= 0 && value <= sales.subtotal) {
+        sales.applyCustomDiscount(value);
+        _showSnackBar('Discount of Rs ${value.toStringAsFixed(2)} applied',
+            isSuccess: true);
+      } else {
+        _showSnackBar('Enter an amount between 0 and the subtotal');
+      }
     }
   }
 
@@ -616,6 +670,18 @@ class _PosScreenState extends State<PosScreen> {
           settingsProvider,
         );
         return;
+      }
+
+      // Pop the cash drawer now that the bill is safely out. Exactly-once per
+      // sale is guaranteed by the drawer_events row, so a reprint or a double
+      // tap can never open the till twice.
+      if (!isReprint) {
+        await CashDrawerCoordinator().openAfterSale(
+          sale: lastSale,
+          isCardOnly: !lastSale.isSplitPayment &&
+              lastSale.paymentMethod == 'Card',
+          settings: settings,
+        );
       }
 
       _showSnackBar(
@@ -1106,9 +1172,94 @@ class _PosScreenState extends State<PosScreen> {
       return;
     }
 
-    await context.read<SalesProvider>().addToCart(product);
+    // Weighed products (rice, dhal, vegetables...) are priced per kg, so the
+    // cashier keys the weight instead of getting a fixed quantity of 1.
+    double quantity = 1;
+    if (product.soldByWeight == true) {
+      final weight = await _promptWeight(product);
+      if (weight == null) return; // cashier cancelled
+      quantity = weight;
+    }
+
+    await context.read<SalesProvider>().addToCart(product, quantity: quantity);
     SoundService.playBeep();
     _showSnackBar('${product.name} added to cart', isSuccess: true);
+  }
+
+  /// Big touch-friendly weight/quantity keypad for per-kg products.
+  /// Returns the chosen weight in kg, or null when cancelled.
+  Future<double?> _promptWeight(dynamic product) async {
+    final controller = TextEditingController();
+    return showDialog<double>(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('${product.name} (per kg)'),
+        content: SizedBox(
+          width: 340,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                autofocus: true,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                style: const TextStyle(
+                    fontSize: 32, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+                decoration: const InputDecoration(
+                  labelText: 'Weight (kg)',
+                  hintText: 'e.g. 0.500',
+                  border: OutlineInputBorder(),
+                ),
+                onSubmitted: (_) {
+                  final w = double.tryParse(controller.text.trim());
+                  if (w != null && w > 0) Navigator.pop(context, w);
+                },
+              ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  for (final w in [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 5.0])
+                    OutlinedButton(
+                      onPressed: () => Navigator.pop(context, w),
+                      child: Text(
+                          '${w % 1 == 0 ? w.toInt() : w} kg'),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Stock: ${MoneyCalculator.formatQty(product.quantity, byWeight: true)} kg  ·  Rs. ${product.sellingPrice.toStringAsFixed(2)}/kg',
+                style: const TextStyle(
+                    color: PosAppTheme.textGray, fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: PosAppTheme.primaryGreen),
+            onPressed: () {
+              final w = double.tryParse(controller.text.trim());
+              if (w != null && w > 0) {
+                Navigator.pop(context, w);
+              }
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _showProductPreviewDialog(dynamic product) async {
@@ -1178,7 +1329,8 @@ class _PosScreenState extends State<PosScreen> {
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
-                          'Stock: ${product.quantity}',
+                          'Stock: ${MoneyCalculator.formatQty(product.quantity, byWeight: product.soldByWeight)}'
+                          '${product.soldByWeight ? ' kg' : ''}',
                           style: TextStyle(
                             color: product.quantity > 0
                                 ? Colors.green
@@ -1201,13 +1353,8 @@ class _PosScreenState extends State<PosScreen> {
                       ),
                       onPressed: product.quantity > 0
                           ? () async {
-                              await context
-                                  .read<SalesProvider>()
-                                  .addToCart(product);
-                              SoundService.playBeep();
-                              if (context.mounted) Navigator.pop(context);
-                              _showSnackBar('${product.name} added to cart',
-                                  isSuccess: true);
+                              Navigator.pop(context);
+                              await _addProductToCart(product);
                             }
                           : null,
                       child: const Text(
@@ -1337,7 +1484,8 @@ class _PosScreenState extends State<PosScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Rs. ${product.sellingPrice.toStringAsFixed(2)}',
+                          'Rs. ${product.sellingPrice.toStringAsFixed(2)}'
+                          '${product.soldByWeight ? ' /kg' : ''}',
                           style: TextStyle(
                             color: PosAppTheme.primaryGreen,
                             fontWeight: FontWeight.bold,
@@ -1357,7 +1505,8 @@ class _PosScreenState extends State<PosScreen> {
                         else
                           Text(
                             isAvailable
-                                ? 'Stock: ${product.quantity}'
+                                ? 'Stock: ${MoneyCalculator.formatQty(product.quantity, byWeight: product.soldByWeight)}'
+                                    '${product.soldByWeight ? ' kg' : ''}'
                                 : 'Out of Stock',
                             style: TextStyle(
                               fontSize: responsive.bodySmall,
@@ -1563,7 +1712,8 @@ class _PosScreenState extends State<PosScreen> {
                       ),
                       SizedBox(height: responsive.paddingXSmall),
                       Text(
-                        'Rs. ${cartItem.unitPrice.toStringAsFixed(2)}',
+                        'Rs. ${cartItem.unitPrice.toStringAsFixed(2)}'
+                        '${cartItem.product.soldByWeight ? ' /kg' : ''}',
                         style: TextStyle(
                           fontSize: responsive.bodySmall,
                           color: PosAppTheme.textGray,
@@ -1572,17 +1722,26 @@ class _PosScreenState extends State<PosScreen> {
                     ],
                   ),
                 ),
-                Tooltip(
-                  message: 'Remove item',
-                  child: IconButton(
-                    iconSize: responsive.iconSmall,
-                    icon: const Icon(Icons.close),
-                    color: PosAppTheme.dangerRed,
-                    onPressed: () {
+                // Big, easy-to-hit remove control for touch screens —
+                // deletes the whole line from the cart.
+                Material(
+                  color: PosAppTheme.dangerRed.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: () {
                       context
                           .read<SalesProvider>()
                           .removeFromCart(cartItem.product.id);
                     },
+                    child: const Padding(
+                      padding: EdgeInsets.all(8),
+                      child: Icon(
+                        Icons.delete_outline,
+                        color: PosAppTheme.dangerRed,
+                        size: 24,
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -1599,25 +1758,50 @@ class _PosScreenState extends State<PosScreen> {
                         iconSize: responsive.iconSmall,
                         icon: const Icon(Icons.remove),
                         onPressed: () {
-                          if (cartItem.quantity > 1) {
+                          final step =
+                              cartItem.product.soldByWeight ? 0.25 : 1.0;
+                          if (cartItem.quantity - step > 0) {
                             context
                                 .read<SalesProvider>()
                                 .updateCartItemQuantity(
                                   cartItem.product.id,
-                                  cartItem.quantity - 1,
+                                  cartItem.quantity - step,
                                 );
+                          } else {
+                            // At the minimum quantity, minus removes the
+                            // line entirely.
+                            context
+                                .read<SalesProvider>()
+                                .removeFromCart(cartItem.product.id);
                           }
                         },
                       ),
-                      Container(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: responsive.paddingSmall,
-                        ),
-                        child: Text(
-                          '${cartItem.quantity}',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: responsive.bodyMedium,
+                      InkWell(
+                        onTap: cartItem.product.soldByWeight
+                            ? () async {
+                                final w =
+                                    await _promptWeight(cartItem.product);
+                                if (w != null) {
+                                  await context
+                                      .read<SalesProvider>()
+                                      .updateCartItemQuantity(
+                                        cartItem.product.id,
+                                        w,
+                                      );
+                                }
+                              }
+                            : null,
+                        child: Container(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: responsive.paddingSmall,
+                          ),
+                          child: Text(
+                            '${MoneyCalculator.formatQty(cartItem.quantity, byWeight: cartItem.product.soldByWeight)}'
+                            '${cartItem.product.soldByWeight ? ' kg' : ''}',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: responsive.bodyMedium,
+                            ),
                           ),
                         ),
                       ),
@@ -1625,9 +1809,11 @@ class _PosScreenState extends State<PosScreen> {
                         iconSize: responsive.iconSmall,
                         icon: const Icon(Icons.add),
                         onPressed: () {
+                          final step =
+                              cartItem.product.soldByWeight ? 0.25 : 1.0;
                           context.read<SalesProvider>().updateCartItemQuantity(
                                 cartItem.product.id,
-                                cartItem.quantity + 1,
+                                cartItem.quantity + step,
                               );
                         },
                       ),
@@ -1680,9 +1866,6 @@ class _PosScreenState extends State<PosScreen> {
                         // ── Customer (optional, compact) ──────────
                         Consumer<CustomerProvider>(
                           builder: (context, custProv, _) {
-                            final selected = _selectedCustomerId != null
-                                ? custProv.getCustomerById(_selectedCustomerId!)
-                                : null;
                             return DropdownButtonFormField<String>(
                               initialValue: _selectedCustomerId,
                               isDense: true,
@@ -1690,32 +1873,7 @@ class _PosScreenState extends State<PosScreen> {
                               decoration: InputDecoration(
                                 labelText: 'Customer (optional)',
                                 prefixIcon: const Icon(Icons.person, size: 20),
-                                suffixIcon: selected != null &&
-                                        selected.loyaltyPoints > 0
-                                    ? Padding(
-                                        padding:
-                                            const EdgeInsets.only(right: 12),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            const Icon(
-                                              Icons.stars,
-                                              size: 18,
-                                              color: PosAppTheme.warningOrange,
-                                            ),
-                                            Text(
-                                              '${selected.loyaltyPoints} pts',
-                                              style: const TextStyle(
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.bold,
-                                                color:
-                                                    PosAppTheme.warningOrange,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      )
-                                    : null,
+
                                 contentPadding: const EdgeInsets.symmetric(
                                   horizontal: 12,
                                   vertical: 10,
@@ -1731,78 +1889,46 @@ class _PosScreenState extends State<PosScreen> {
                               onChanged: (id) {
                                 setState(() {
                                   _selectedCustomerId = id;
-                                  _redeemPoints = false;
                                 });
                               },
                             );
                           },
                         ),
                         SizedBox(height: responsive.paddingXSmall),
-                        // ── Loyalty redeem (compact, only when eligible) ──
-                        Consumer<CustomerProvider>(
-                          builder: (context, custProv, _) {
-                            if (_selectedCustomerId == null) {
-                              return const SizedBox.shrink();
-                            }
-                            final customer =
-                                custProv.getCustomerById(_selectedCustomerId!);
-                            if (customer == null ||
-                                customer.loyaltyPoints <= 0) {
-                              return const SizedBox.shrink();
-                            }
-                            final maxRedeemable = customer.loyaltyPoints
-                                .toDouble()
-                                .clamp(0.0, salesProvider.total);
-                            return Padding(
-                              padding: EdgeInsets.only(
-                                  bottom: responsive.paddingXSmall),
-                              child: InkWell(
-                                onTap: () => setState(
-                                    () => _redeemPoints = !_redeemPoints),
-                                borderRadius: BorderRadius.circular(8),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 6,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color:
-                                        PosAppTheme.warningOrange.withOpacity(
-                                      _redeemPoints ? 0.22 : 0.08,
-                                    ),
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Text(
-                                        'Redeem ${customer.loyaltyPoints} pts'
-                                        ' ($currency ${customer.loyaltyPoints.toStringAsFixed(2)})'
-                                        '  ·  Max $currency ${maxRedeemable.toStringAsFixed(2)}',
-                                        style: TextStyle(
-                                          fontSize: responsive.bodyTiny,
-                                          fontWeight: _redeemPoints
-                                              ? FontWeight.bold
-                                              : FontWeight.w500,
-                                        ),
-                                      ),
-                                      if (_redeemPoints)
-                                        const Text(
-                                          'APPLIED',
-                                          style: TextStyle(
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.w900,
-                                            color: PosAppTheme.successGreen,
-                                          ),
-                                        ),
-                                    ],
-                                  ),
+                        // ── Discount (exact % or exact Rs) ─────────
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: salesProvider.cartItems.isEmpty
+                                    ? null
+                                    : _showDiscountDialog,
+                                icon: const Icon(Icons.percent, size: 18),
+                                label: Text(
+                                  salesProvider.totalDiscount > 0
+                                      ? 'Discount: $currency ${salesProvider.totalDiscount.toStringAsFixed(2)}'
+                                      : 'Add Discount',
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: PosAppTheme.primaryGreen,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 10),
                                 ),
                               ),
-                            );
-                          },
+                            ),
+                            if (salesProvider.totalDiscount > 0)
+                              IconButton(
+                                tooltip: 'Remove discount',
+                                icon: const Icon(Icons.close, size: 18),
+                                color: PosAppTheme.dangerRed,
+                                onPressed: () => context
+                                    .read<SalesProvider>()
+                                    .setGlobalDiscount(0),
+                              ),
+                          ],
                         ),
+                        SizedBox(height: responsive.paddingXSmall),
                         // ── Payment Method ─────────────────────────
                         if (salesProvider.totalDiscount != 0)
                           Padding(
@@ -2134,6 +2260,99 @@ class _PosScreenState extends State<PosScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Compact toast that floats at the top-right of the POS screen (above the
+/// cart column). Inserted as an [OverlayEntry] by `_showSnackBar`.
+class _PosToast extends StatefulWidget {
+  const _PosToast({required this.message, required this.isSuccess});
+
+  final String message;
+  final bool isSuccess;
+
+  @override
+  State<_PosToast> createState() => _PosToastState();
+}
+
+class _PosToastState extends State<_PosToast>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 250),
+  )..forward();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = widget.isSuccess
+        ? PosAppTheme.successGreen
+        : PosAppTheme.dangerRed;
+    return Positioned(
+      top: 72,
+      right: 16,
+      child: FadeTransition(
+        opacity: _controller,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0.15, -0.1),
+            end: Offset.zero,
+          ).animate(CurvedAnimation(
+            parent: _controller,
+            curve: Curves.easeOutCubic,
+          )),
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 320),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 10,
+              ),
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(10),
+                boxShadow: [
+                  BoxShadow(
+                    color: color.withOpacity(0.35),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    widget.isSuccess
+                        ? Icons.check_circle_outline
+                        : Icons.error_outline,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      widget.message,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

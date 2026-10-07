@@ -9,8 +9,6 @@ class Customer {
     this.address,
     this.totalSpent = 0.0,
     this.totalTransactions = 0,
-    this.creditBalance = 0.0,
-    this.loyaltyPoints = 0,
     DateTime? createdAt,
     DateTime? lastPurchaseDate,
     this.isActive = true,
@@ -29,8 +27,6 @@ class Customer {
             : map['address'],
         totalSpent: (map['totalSpent'] as num).toDouble(),
         totalTransactions: map['totalTransactions'] as int,
-        creditBalance: (map['creditBalance'] as num?)?.toDouble() ?? 0.0,
-        loyaltyPoints: (map['loyaltyPoints'] as int?) ?? 0,
         createdAt: DateTime.parse(map['createdAt'] as String),
         lastPurchaseDate: DateTime.parse(map['lastPurchaseDate'] as String),
         isActive: (map['isActive'] as int) == 1,
@@ -42,8 +38,6 @@ class Customer {
   final String? address;
   final double totalSpent;
   final int totalTransactions;
-  final double creditBalance;
-  final int loyaltyPoints;
   final DateTime createdAt;
   final DateTime lastPurchaseDate;
   final bool isActive;
@@ -55,8 +49,6 @@ class Customer {
     String? address,
     double? totalSpent,
     int? totalTransactions,
-    double? creditBalance,
-    int? loyaltyPoints,
     DateTime? lastPurchaseDate,
     bool? isActive,
   }) =>
@@ -68,8 +60,6 @@ class Customer {
         address: address ?? this.address,
         totalSpent: totalSpent ?? this.totalSpent,
         totalTransactions: totalTransactions ?? this.totalTransactions,
-        creditBalance: creditBalance ?? this.creditBalance,
-        loyaltyPoints: loyaltyPoints ?? this.loyaltyPoints,
         createdAt: createdAt,
         lastPurchaseDate: lastPurchaseDate ?? this.lastPurchaseDate,
         isActive: isActive ?? this.isActive,
@@ -83,8 +73,6 @@ class Customer {
         'address': address ?? '',
         'totalSpent': totalSpent,
         'totalTransactions': totalTransactions,
-        'creditBalance': creditBalance,
-        'loyaltyPoints': loyaltyPoints,
         'createdAt': createdAt.toIso8601String(),
         'lastPurchaseDate': lastPurchaseDate.toIso8601String(),
         'isActive': isActive ? 1 : 0,

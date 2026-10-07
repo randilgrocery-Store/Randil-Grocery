@@ -62,8 +62,53 @@ class _GrnScreenState extends State<GrnScreen>
   double get _goodsTotal =>
       _lines.fold<double>(0, (sum, line) => sum + line.lineTotal);
 
-  int get _totalUnits =>
-      _lines.fold<int>(0, (sum, line) => sum + line.quantity);
+  double get _totalUnits =>
+      _lines.fold<double>(0, (sum, line) => sum + line.quantity);
+
+  /// Shows how much the shop already owes the selected supplier so the
+  /// person receiving goods can see the running balance at a glance.
+  Widget _supplierOutstandingBanner() {
+    final provider = context.watch<SupplierProvider>();
+    final owed = provider.outstandingFor(_supplierId!);
+    final supplier = provider.suppliers
+        .where((s) => s.id == _supplierId)
+        .firstOrNull;
+    final hasDebt = owed > 0.005;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: hasDebt
+            ? Colors.red.withOpacity(0.08)
+            : Colors.green.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: hasDebt ? Colors.red.shade200 : Colors.green.shade200,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            hasDebt ? Icons.warning_amber : Icons.check_circle,
+            size: 20,
+            color: hasDebt ? Colors.red[700] : Colors.green[700],
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              hasDebt
+                  ? 'Still owe ${supplier?.name ?? 'supplier'}: Rs. ${owed.toStringAsFixed(2)}'
+                  : '${supplier?.name ?? 'Supplier'} is fully paid',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: hasDebt ? Colors.red[700] : Colors.green[700],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -211,6 +256,9 @@ class _GrnScreenState extends State<GrnScreen>
                     ],
                   ),
                   SizedBox(height: responsive.paddingSmall),
+                  if (_supplierId != null) _supplierOutstandingBanner(),
+                  if (_supplierId != null)
+                    SizedBox(height: responsive.paddingSmall),
                   TextField(
                     controller: _notesController,
                     maxLines: 2,
@@ -291,7 +339,7 @@ class _GrnScreenState extends State<GrnScreen>
                               ? _grnNumberController.text
                               : line.batchNumber,
                         )),
-                        DataCell(Text('${line.quantity}')),
+                        DataCell(Text(fmtQty(line.quantity))),
                         DataCell(Text('$symbol ${line.costPrice.toStringAsFixed(2)}')),
                         DataCell(
                             Text('$symbol ${line.sellingPrice.toStringAsFixed(2)}')),
@@ -313,7 +361,7 @@ class _GrnScreenState extends State<GrnScreen>
               padding: EdgeInsets.all(responsive.paddingMedium),
               child: Column(
                 children: [
-                  _summaryRow('Total Units', '$_totalUnits'),
+                  _summaryRow('Total Units', fmtQty(_totalUnits)),
                   const Divider(),
                   _summaryRow(
                     'Goods Total',
@@ -421,7 +469,7 @@ class _GrnScreenState extends State<GrnScreen>
                     for (final item in grn.items)
                       DataRow(cells: [
                         DataCell(Text(item.productName)),
-                        DataCell(Text('${item.quantity}')),
+                        DataCell(Text(fmtQty(item.quantity))),
                         DataCell(Text(item.costPrice.toStringAsFixed(2))),
                         DataCell(Text(item.sellingPrice.toStringAsFixed(2))),
                       ]),
@@ -568,11 +616,11 @@ class _GrnScreenState extends State<GrnScreen>
             ElevatedButton(
               onPressed: () {
                 if (selected == null) return;
-                final qty = int.tryParse(qtyController.text) ?? 0;
+                final qty = double.tryParse(qtyController.text) ?? 0;
                 final cost = double.tryParse(costController.text) ?? -1;
                 final sell = double.tryParse(sellController.text) ?? -1;
                 if (qty <= 0 || cost < 0 || sell < 0) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  showTopSnackBar(context, 
                     const SnackBar(
                       content: Text('Enter a valid quantity, cost and price'),
                     ),
@@ -628,7 +676,7 @@ class _GrnScreenState extends State<GrnScreen>
                   orElse: () => null,
                 );
             if (match == null) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              showTopSnackBar(context, 
                 const SnackBar(content: Text('No matching product found')),
               );
               return;
@@ -712,7 +760,7 @@ class _GrnScreenState extends State<GrnScreen>
   }
 
   void _snack(String message, {bool success = false}) {
-    ScaffoldMessenger.of(context).showSnackBar(
+    showTopSnackBar(context, 
       SnackBar(
         content: Text(message),
         backgroundColor:
@@ -733,7 +781,7 @@ class _GrnLine {
   });
 
   final Product product;
-  final int quantity;
+  final double quantity;
   final double costPrice;
   final double sellingPrice;
   final String batchNumber;

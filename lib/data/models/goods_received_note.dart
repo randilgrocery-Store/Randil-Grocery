@@ -18,7 +18,7 @@ class GrnItem {
         productId: map['productId'] as String,
         productName: map['productName'] as String,
         barcode: map['barcode'] as String? ?? '',
-        quantity: map['quantity'] as int,
+        quantity: (map['quantity'] as num).toDouble(),
         costPrice: (map['costPrice'] as num).toDouble(),
         sellingPrice: (map['sellingPrice'] as num).toDouble(),
         batchNumber: map['batchNumber'] as String? ?? '',
@@ -30,7 +30,7 @@ class GrnItem {
   final String productId;
   final String productName;
   final String barcode;
-  final int quantity;
+  final double quantity;
   final double costPrice;
   final double sellingPrice;
   final String batchNumber;
@@ -99,7 +99,7 @@ class GoodsReceivedNote {
   final DateTime createdAt;
 
   double get total => items.fold<double>(0, (sum, i) => sum + i.lineTotal);
-  int get totalItems => items.fold<int>(0, (sum, i) => sum + i.quantity);
+  double get totalItems => items.fold<double>(0, (sum, i) => sum + i.quantity);
 
   Map<String, dynamic> toMap() => {
         'id': id,

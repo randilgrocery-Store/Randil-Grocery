@@ -358,7 +358,7 @@ class _RefundReturnScreenState extends State<RefundReturnScreen> {
     }
 
     await _refreshData();
-    ScaffoldMessenger.of(context).showSnackBar(
+    showTopSnackBar(context, 
       const SnackBar(content: Text('Return request created successfully')),
     );
   }
@@ -504,7 +504,7 @@ class _RefundDetailsDialogState extends State<RefundDetailsDialog> {
                         ),
                       ),
                       Text(
-                        '${item.quantity}x ${context.read<SettingsProvider>().settings.currencySymbol} ${item.originalPrice}',
+                        '${fmtQty(item.quantity)}x ${context.read<SettingsProvider>().settings.currencySymbol} ${item.originalPrice}',
                       ),
                     ],
                   ),
@@ -669,7 +669,7 @@ class _RefundDetailsDialogState extends State<RefundDetailsDialog> {
     );
     if (mounted) {
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         const SnackBar(content: Text('Refund approved successfully')),
       );
     }
@@ -684,7 +684,7 @@ class _RefundDetailsDialogState extends State<RefundDetailsDialog> {
     );
     if (mounted) {
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         const SnackBar(content: Text('Refund rejected')),
       );
     }
@@ -699,7 +699,7 @@ class _RefundDetailsDialogState extends State<RefundDetailsDialog> {
 
     if (mounted) {
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         const SnackBar(content: Text('Refund processed successfully')),
       );
     }
@@ -729,7 +729,7 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
     super.initState();
     _selectedItems = List<bool>.filled(widget.sale.items.length, true);
     _quantityControllers = widget.sale.items
-        .map((item) => TextEditingController(text: item.quantity.toString()))
+        .map((item) => TextEditingController(text: fmtQty(item.quantity)))
         .toList();
     _reasonController.text = 'Customer return';
   }
@@ -753,12 +753,12 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
       }
 
       final saleItem = widget.sale.items[index];
-      final quantity = int.tryParse(_quantityControllers[index].text) ?? 0;
+      final quantity = double.tryParse(_quantityControllers[index].text) ?? 0;
       if (quantity <= 0) {
         continue;
       }
 
-      final validQuantity = quantity.clamp(0, saleItem.quantity);
+      final validQuantity = quantity.clamp(0.0, saleItem.quantity);
       final unitNet = saleItem.price * (1 - (saleItem.discount / 100));
       total += unitNet * validQuantity;
     }
@@ -810,7 +810,7 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
                             },
                             title: Text(item.productName),
                             subtitle: Text(
-                              'Sold qty: ${item.quantity} • Unit price: ${context.read<SettingsProvider>().settings.currencySymbol} ${item.price.toStringAsFixed(2)}',
+                              'Sold qty: ${fmtQty(item.quantity)} • Unit price: ${context.read<SettingsProvider>().settings.currencySymbol} ${item.price.toStringAsFixed(2)}',
                             ),
                           ),
                           Row(
@@ -830,7 +830,7 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
                               const SizedBox(width: 12),
                               Expanded(
                                 child: Text(
-                                  'Refund amount: ${context.read<SettingsProvider>().settings.currencySymbol} ${((item.price * (1 - item.discount / 100)) * ((int.tryParse(_quantityControllers[index].text) ?? 0).clamp(0, item.quantity))).toStringAsFixed(2)}',
+                                  'Refund amount: ${context.read<SettingsProvider>().settings.currencySymbol} ${((item.price * (1 - item.discount / 100)) * ((double.tryParse(_quantityControllers[index].text) ?? 0).clamp(0.0, item.quantity))).toStringAsFixed(2)}',
                                 ),
                               ),
                             ],
@@ -935,9 +935,9 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
 
                       final saleItem = widget.sale.items[index];
                       final quantity =
-                          int.tryParse(_quantityControllers[index].text) ?? 0;
+                          double.tryParse(_quantityControllers[index].text) ?? 0;
                       final validQuantity =
-                          quantity.clamp(0, saleItem.quantity).toInt();
+                          quantity.clamp(0.0, saleItem.quantity).toDouble();
                       if (validQuantity <= 0) {
                         continue;
                       }

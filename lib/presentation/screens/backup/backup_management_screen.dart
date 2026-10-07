@@ -76,7 +76,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         SnackBar(content: Text('Error loading backups: $e')),
       );
     }
@@ -129,7 +129,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
         customPath: _configuredBackupPath,
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showTopSnackBar(context, 
           const SnackBar(content: Text('Old backups cleaned up')),
         );
       }
@@ -137,7 +137,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
       _checkStorage();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showTopSnackBar(context, 
           SnackBar(content: Text('Error cleaning backups: $e')),
         );
       }
@@ -156,7 +156,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
       );
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showTopSnackBar(context, 
           SnackBar(
             content: Text(
               result.localSaved
@@ -178,7 +178,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
       _checkStorage();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showTopSnackBar(context, 
           SnackBar(content: Text('Error creating backup: $e')),
         );
       }
@@ -195,7 +195,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
         if (!mounted) {
           return;
         }
-        ScaffoldMessenger.of(context).showSnackBar(
+        showTopSnackBar(context, 
           const SnackBar(content: Text('Backup folder is not available yet')),
         );
         return;
@@ -206,7 +206,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
         if (!mounted) {
           return;
         }
-        ScaffoldMessenger.of(context).showSnackBar(
+        showTopSnackBar(context, 
           const SnackBar(content: Text('Backup folder does not exist')),
         );
         return;
@@ -217,9 +217,81 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         SnackBar(content: Text('Unable to open folder: $e')),
       );
+    }
+  }
+
+  Future<void> _restoreBackup(String path) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Restore this backup?'),
+        content: const Text(
+            'ALL current data will be replaced by this backup. A safety copy of the current database is kept automatically. Continue?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      final dbService = DatabaseService();
+      final targetPath = await dbService.getDatabasePath();
+      final backupFile = File(path);
+      if (!backupFile.existsSync()) {
+        if (!mounted) return;
+        showTopSnackBar(context,
+            const SnackBar(content: Text('Backup file not found')));
+        return;
+      }
+
+      // Keep a safety copy of the live DB before overwriting.
+      final current = File(targetPath);
+      if (current.existsSync()) {
+        await current.copy('$targetPath.pre-restore');
+      }
+
+      var ok = false;
+      if (path.endsWith('.db')) {
+        await backupFile.copy(targetPath);
+        ok = true;
+      } else {
+        ok = await BackupService().restoreFromBackup(path, targetPath);
+      }
+
+      if (!mounted) return;
+      if (ok) {
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Restore complete'),
+            content: const Text(
+                'The backup was restored. Please close and reopen RandilPOS now to load the restored data.'),
+            actions: [
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      } else {
+        showTopSnackBar(context,
+            const SnackBar(content: Text('Restore failed — backup may be corrupt')));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      showTopSnackBar(context, SnackBar(content: Text('Restore failed: $e')));
     }
   }
 
@@ -250,7 +322,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
           await file.delete();
         }
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             const SnackBar(content: Text('Backup deleted')),
           );
         }
@@ -258,7 +330,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
         _checkStorage();
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             SnackBar(content: Text('Error deleting backup: $e')),
           );
         }
@@ -314,7 +386,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
                     if (!mounted) {
                       return;
                     }
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    showTopSnackBar(context, 
                       const SnackBar(
                         content: Text('Backup folder path copied'),
                         backgroundColor: PosAppTheme.successGreen,
@@ -396,6 +468,7 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
                 else
                   BackupListWidget(
                     backups: _backups,
+                    onRestore: _restoreBackup,
                     onDelete: _deleteBackup,
                   ),
               ],

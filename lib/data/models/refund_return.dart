@@ -16,7 +16,7 @@ class RefundReturnItem { // e.g., "Damaged", "Defective", "Wrong item", "Custome
       saleItemId: map['saleItemId'] as String,
       productId: map['productId'] as String,
       productName: map['productName'] as String,
-      quantity: map['quantity'] as int,
+      quantity: (map['quantity'] as num).toDouble(),
       originalPrice: (map['originalPrice'] as num).toDouble(),
       refundAmount: (map['refundAmount'] as num).toDouble(),
       reason: map['reason'] as String,
@@ -24,7 +24,7 @@ class RefundReturnItem { // e.g., "Damaged", "Defective", "Wrong item", "Custome
   final String saleItemId;
   final String productId;
   final String productName;
-  final int quantity;
+  final double quantity;
   final double originalPrice;
   final double refundAmount;
   final String

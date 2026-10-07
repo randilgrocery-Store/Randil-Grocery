@@ -161,11 +161,7 @@ class _CustomerManagementScreenState extends State<CustomerManagementScreen>
                                   context,
                                   customer.id,
                                 ),
-                                onCreditAdjust: () =>
-                                    _showCreditAdjustDialog(context, customer),
-                                onPointsAdjust: () =>
-                                    _showPointsAdjustDialog(context, customer),
-                              ),
+                                                          ),
                             ),
                           ),
                       );
@@ -186,7 +182,7 @@ class _CustomerManagementScreenState extends State<CustomerManagementScreen>
         onSave: (customer) {
           context.read<CustomerProvider>().addCustomer(customer);
           Navigator.pop(context);
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             const SnackBar(
               content: Text('Customer added successfully'),
               backgroundColor: Colors.green,
@@ -205,7 +201,7 @@ class _CustomerManagementScreenState extends State<CustomerManagementScreen>
         onSave: (updatedCustomer) {
           context.read<CustomerProvider>().updateCustomer(updatedCustomer);
           Navigator.pop(context);
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             const SnackBar(
               content: Text('Customer updated successfully'),
               backgroundColor: Colors.green,
@@ -231,7 +227,7 @@ class _CustomerManagementScreenState extends State<CustomerManagementScreen>
             onPressed: () {
               context.read<CustomerProvider>().deleteCustomer(id);
               Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
+              showTopSnackBar(context, 
                 const SnackBar(
                   content: Text('Customer deleted successfully'),
                   backgroundColor: Colors.green,
@@ -248,146 +244,17 @@ class _CustomerManagementScreenState extends State<CustomerManagementScreen>
     );
   }
 
-  void _showCreditAdjustDialog(BuildContext context, Customer customer) {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Adjust Credit – ${customer.name}'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-                'Current balance: Rs. ${customer.creditBalance.toStringAsFixed(2)}'),
-            const SizedBox(height: 12),
-            GroceryTextField(
-              controller: controller,
-              label: 'Amount',
-              hint: 'Enter amount (positive = top up, negative = deduct)',
-              prefixIcon: Icons.monetization_on,
-              keyboardType:
-                  const TextInputType.numberWithOptions(signed: true),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final amount = double.tryParse(controller.text);
-              if (amount == null || amount == 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Please enter a valid amount'),
-                    backgroundColor: Colors.red,
-                  ),
-                );
-                return;
-              }
-              context.read<CustomerProvider>().adjustCustomerCredit(
-                    customer.id,
-                    amount.abs(),
-                    add: amount > 0,
-                  );
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(amount > 0
-                      ? 'Credited Rs. ${amount.toStringAsFixed(2)}'
-                      : 'Deducted Rs. ${(-amount).toStringAsFixed(2)}'),
-                  backgroundColor: Colors.green,
-                ),
-              );
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: PosAppTheme.primaryGreen,
-            ),
-            child: const Text('Apply'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showPointsAdjustDialog(BuildContext context, Customer customer) {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Adjust Points – ${customer.name}'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Current points: ${customer.loyaltyPoints}'),
-            const SizedBox(height: 12),
-            GroceryTextField(
-              controller: controller,
-              label: 'Points',
-              hint: 'Positive = add, negative = remove',
-              prefixIcon: Icons.star,
-              keyboardType:
-                  const TextInputType.numberWithOptions(signed: true),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final points = int.tryParse(controller.text);
-              if (points == null || points == 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Please enter a valid whole number'),
-                    backgroundColor: Colors.red,
-                  ),
-                );
-                return;
-              }
-              context.read<CustomerProvider>().adjustCustomerLoyaltyPoints(
-                    customer.id,
-                    points,
-                  );
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(points > 0
-                      ? 'Added $points points'
-                      : 'Removed ${-points} points'),
-                  backgroundColor: Colors.green,
-                ),
-              );
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: PosAppTheme.primaryGreen,
-            ),
-            child: const Text('Apply'),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class CustomerCard extends StatelessWidget {
 
   const CustomerCard({
     required this.customer, required this.onEdit, required this.onDelete,
-    required this.onCreditAdjust, required this.onPointsAdjust, super.key,
+    super.key,
   });
   final Customer customer;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
-  final VoidCallback onCreditAdjust;
-  final VoidCallback onPointsAdjust;
 
   @override
   Widget build(BuildContext context) => GroceryCard(
@@ -433,27 +300,6 @@ class CustomerCard extends StatelessWidget {
                           size: 12, color: PosAppTheme.successGreen),
                       const SizedBox(width: 4),
                       Text(
-                        'Credit: Rs. ${customer.creditBalance.toStringAsFixed(2)}',
-                        style: const TextStyle(
-                          color: PosAppTheme.successGreen,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 11,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      const Icon(Icons.star,
-                          size: 12, color: PosAppTheme.warningOrange),
-                      const SizedBox(width: 4),
-                      Text(
-                        'Points: ${customer.loyaltyPoints}',
-                        style: const TextStyle(
-                          color: PosAppTheme.warningOrange,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 11,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
                         'Spent: Rs. ${customer.totalSpent.toStringAsFixed(2)}',
                         style: const TextStyle(
                           color: PosAppTheme.textGray,
@@ -466,34 +312,6 @@ class CustomerCard extends StatelessWidget {
                         style: const TextStyle(
                           color: PosAppTheme.textGray,
                           fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      TextButton.icon(
-                        onPressed: onCreditAdjust,
-                        icon: const Icon(Icons.account_balance_wallet,
-                            size: 14, color: PosAppTheme.accentBlue),
-                        label: const Text('Add/Deduct Credit',
-                            style: TextStyle(fontSize: 11)),
-                        style: TextButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      TextButton.icon(
-                        onPressed: onPointsAdjust,
-                        icon: const Icon(Icons.star,
-                            size: 14, color: PosAppTheme.warningOrange),
-                        label: const Text('Adjust Points',
-                            style: TextStyle(fontSize: 11)),
-                        style: TextButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          padding: EdgeInsets.zero,
                         ),
                       ),
                     ],
@@ -606,7 +424,7 @@ class _CustomerDialogState extends State<_CustomerDialog> {
             if (_nameController.text.isEmpty ||
                 _phoneController.text.isEmpty ||
                 _emailController.text.isEmpty) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              showTopSnackBar(context, 
                 const SnackBar(
                   content: Text('Please fill all required fields'),
                   backgroundColor: Colors.red,

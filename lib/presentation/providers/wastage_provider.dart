@@ -30,7 +30,7 @@ class WastageProvider extends ChangeNotifier {
   Future<Wastage?> addWastage({
     required String productId,
     required String productName,
-    required int quantity,
+    required double quantity,
     required String reason,
     String batchId = '',
     String batchNumber = '',

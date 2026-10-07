@@ -4,18 +4,83 @@ import 'package:provider/provider.dart';
 
 import 'dart:io';
 
+import 'dart:ffi' hide Size;
+
+import 'package:ffi/ffi.dart';
+import 'package:win32/win32.dart';
+
 import '../../../core/utils/secure_storage.dart';
 
 import '../../../data/database/database_service.dart';
 import '../../../data/models/user.dart';
 import '../../../data/services/backup_service.dart';
+import '../../../data/services/cash_drawer_service.dart';
 import '../../../data/services/print_service.dart';
 import '../../../data/services/supabase_sync_service.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/network_provider.dart';
 import '../../providers/settings_provider.dart';
+import '../../components/app_card.dart';
+import '../../components/app_states.dart';
+import '../../components/confirm_dialog.dart';
+import '../../components/kpi_card.dart';
+import '../../components/section_header.dart';
+import '../../components/skeleton_loader.dart';
+import '../../components/status_badge.dart';
+import '../../theme/app_colors.dart';
+import '../../theme/app_tokens.dart';
+import '../../theme/app_typography.dart';
 import '../../widgets/custom_widgets.dart';
 import '../backup/backup_management_screen.dart';
+
+/// Reads the real version of the running EXE with GetFileVersionInfoW /
+/// VerQueryValueW. Reads VS_FIXEDFILEINFO (language-neutral) so no locale
+/// table lookup is needed. Falls back to '—' when the resource is absent.
+String _readExeFileVersion() {
+  try {
+    final exePath = Platform.resolvedExecutable.toNativeUtf16();
+    final root = '\\'.toNativeUtf16();
+    final handle = calloc<Uint32>();
+    try {
+      final size = GetFileVersionInfoSize(exePath, handle);
+      if (size <= 0) {
+        return '—';
+      }
+      final buffer = calloc<Uint8>(size);
+      try {
+        if (GetFileVersionInfo(exePath, 0, size, buffer) == 0) {
+          return '—';
+        }
+        final outPtr = calloc<Pointer>();
+        final lenPtr = calloc<Uint32>();
+        try {
+          if (VerQueryValue(buffer.cast<Void>(), root, outPtr, lenPtr) == 0) {
+            return '—';
+          }
+          final info = outPtr.value.cast<Uint32>();
+          final ms = info[2]; // dwFileVersionMS
+          final ls = info[3]; // dwFileVersionLS
+          final major = (ms >> 16) & 0xFFFF;
+          final minor = ms & 0xFFFF;
+          final patch = (ls >> 16) & 0xFFFF;
+          final build = ls & 0xFFFF;
+          return '$major.$minor.$patch.$build';
+        } finally {
+          calloc.free(outPtr);
+          calloc.free(lenPtr);
+        }
+      } finally {
+        calloc.free(buffer);
+      }
+    } finally {
+      calloc.free(handle);
+      malloc.free(exePath);
+      malloc.free(root);
+    }
+  } catch (_) {
+    return '—';
+  }
+}
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -30,7 +95,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _addressController;
   late TextEditingController _phoneController;
   late TextEditingController _emailController;
-  late TextEditingController _taxPercentageController;
   late TextEditingController _backupLocalPathController;
   late TextEditingController _githubSyncPathController;
   late TextEditingController _githubTokenController;
@@ -47,6 +111,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<String> _printers = [];
   bool _printersLoaded = false;
 
+  /// The active two-pane navigation destination (see [_SettingsNavItem]).
+  int _selectedPane = 0;
+
+  /// Holds the users query so Retry and post-mutation refreshes can point it
+  /// at a fresh future (the four-state [AppAsync] wrapper drives it).
+  Future<List<dynamic>>? _usersFuture;
+
+  /// Cache for the (path, size) query of the About pane, so rebuilding the
+  /// pane doesn't re-stat the database file.
+  Future<(String, String)>? _dbInfoFuture;
+
+  /// True while the shop profile fields differ from the last saved values.
+  bool _shopDirty = false;
+
+  /// Suppresses [_markShopDirty] while [_resetShopFields] is writing back the
+  /// last saved values (otherwise Discard would mark the form dirty again).
+  bool _restoringShop = false;
+
+  Future<(String, String)> _databaseInfo() async {
+    try {
+      final path = await DatabaseService().getDatabasePath();
+      final size = await File(path).length();
+      final sizeText = size >= 1024 * 1024
+          ? '${(size / (1024 * 1024)).toStringAsFixed(1)} MB'
+          : '${(size / 1024).toStringAsFixed(1)} KB';
+      return (path, sizeText);
+    } catch (_) {
+      return ('Unavailable', '—');
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -60,9 +155,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _addressController = TextEditingController(text: settings.address);
     _phoneController = TextEditingController(text: settings.phone);
     _emailController = TextEditingController(text: settings.email);
-    _taxPercentageController = TextEditingController(
-      text: settings.taxPercentage.toString(),
-    );
     _backupLocalPathController = TextEditingController(
       text: settings.backupLocalPath,
     );
@@ -95,6 +187,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _cloudAnonController = TextEditingController(text: cloud.anonKey);
     _enableCloudSync = cloud.enabled;
     _enableGoogleDriveBackup = settings.enableGoogleDriveBackup;
+
+    _shopNameController.addListener(_markShopDirty);
+    _addressController.addListener(_markShopDirty);
+    _phoneController.addListener(_markShopDirty);
+    _emailController.addListener(_markShopDirty);
+  }
+
+  /// Flags the shop form as dirty the first time a field changes after the
+  /// last save/restore.
+  void _markShopDirty() {
+    if (_restoringShop || _shopDirty) {
+      return;
+    }
+    setState(() => _shopDirty = true);
+  }
+
+  /// Restores the shop fields to the LAST SAVED values without recreating
+  /// the controllers. (Recreating them used to leak the old instances.)
+  void _resetShopFields() {
+    _restoringShop = true;
+    final settings = context.read<SettingsProvider>().settings;
+    _shopNameController.text = settings.shopName;
+    _addressController.text = settings.address;
+    _phoneController.text = settings.phone;
+    _emailController.text = settings.email;
+    _restoringShop = false;
+    if (_shopDirty) {
+      setState(() => _shopDirty = false);
+    }
+  }
+
+  /// Re-points the users query at a fresh future so the list refetches
+  /// (used by Retry and after create / edit / delete / toggle).
+  void _reloadUsers() {
+    final auth = context.read<AuthProvider>();
+    setState(() => _usersFuture = auth.getAllUsers());
   }
 
   void _loadPrinters() {
@@ -115,7 +243,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _addressController.dispose();
     _phoneController.dispose();
     _emailController.dispose();
-    _taxPercentageController.dispose();
     _backupLocalPathController.dispose();
     _githubSyncPathController.dispose();
     _githubTokenController.dispose();
@@ -166,7 +293,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           : ' (GitHub push failed: '
               '${_backupService.lastError ?? 'unknown'})';
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         SnackBar(
           content: Text(
           result.localSaved
@@ -186,7 +313,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         SnackBar(
           content: Text('Error creating backup: $e'),
           backgroundColor: PosAppTheme.warningOrange,
@@ -238,7 +365,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         await DatabaseService().closeDatabase();
       } catch (_) {}
 
-      final target = File(targetPath);
       for (final ext in ['.db-wal', '.db-shm']) {
         final sidecar = File('$targetPath$ext');
         try {
@@ -252,7 +378,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         SnackBar(
           content: Text(
             'Restore complete. Please close and reopen the app to use it.',
@@ -264,7 +390,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         SnackBar(
           content: Text('Restore failed: $e'),
           backgroundColor: PosAppTheme.warningOrange,
@@ -275,26 +401,95 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 5,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
+    final colors = context.appColors;
+    return ColoredBox(
+      color: colors.canvas,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildNav(),
+          Container(width: 1, color: colors.border),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(AppSpacing.lg),
+              child: _buildActivePane(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Grouped navigation (BUSINESS / PEOPLE / SYSTEM / HELP)
+  // -------------------------------------------------------------------------
+
+  Widget _buildNav() {
+    final colors = context.appColors;
+    final t = context.typography;
+    return Container(
+      width: 236,
+      color: colors.surface,
+      padding: const EdgeInsets.all(AppSpacing.sm),
+      child: SingleChildScrollView(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _buildHeader(),
-            const SizedBox(height: 16),
-            _buildTabBar(),
-            const SizedBox(height: 16),
+            for (var gi = 0; gi < _navSections.length; gi++) ...[
+              if (gi > 0) const SizedBox(height: AppSpacing.sm),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.sm,
+                  AppSpacing.xxs,
+                  AppSpacing.sm,
+                  AppSpacing.xxs,
+                ),
+                child: Text(
+                  _navSections[gi].label.toUpperCase(),
+                  style: t.caption.copyWith(
+                    color: colors.textTertiary,
+                    letterSpacing: 0.8,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              for (final item in _navSections[gi].items) _navItem(item),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _navItem(_SettingsNavItem item) {
+    final colors = context.appColors;
+    final t = context.typography;
+    final active = _selectedPane == item.index;
+    final fg = active ? colors.onPrimarySoft : colors.textSecondary;
+
+    return GestureDetector(
+      onTap: () => setState(() => _selectedPane = item.index),
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: AppMotion.base,
+        curve: AppMotion.enter,
+        height: AppSizes.minTapTarget,
+        margin: const EdgeInsets.only(bottom: AppSpacing.xxs),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+        decoration: BoxDecoration(
+          color: active ? colors.primarySoft : Colors.transparent,
+          borderRadius: AppRadius.controlRadius,
+        ),
+        child: Row(
+          children: [
+            Icon(item.icon, size: 18, color: fg),
+            const SizedBox(width: AppSpacing.sm),
             Expanded(
-              child: TabBarView(
-                children: [
-                  _buildShopSettings(),
-                  _buildUserManagement(),
-                  _buildBackupSettings(),
-                  _buildCloudSettings(),
-                  _buildAbout(),
-                ],
+              child: Text(
+                item.label,
+                style: t.bodyStrong.copyWith(color: fg),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
@@ -303,85 +498,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _buildHeader() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            PosAppTheme.primaryGreen,
-            PosAppTheme.darkGreen.withOpacity(0.88),
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: PosAppTheme.primaryGreen.withOpacity(0.25),
-            blurRadius: 14,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: const Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'System Settings',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          SizedBox(height: 6),
-          Text(
-            'Configure business profile, users, backups, and system details.',
-            style: TextStyle(color: Colors.white70, fontSize: 13),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTabBar() {
-    return Container(
-      padding: const EdgeInsets.all(6),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: TabBar(
-        labelColor: PosAppTheme.darkGreen,
-        unselectedLabelColor: PosAppTheme.textGray,
-        indicator: BoxDecoration(
-          color: PosAppTheme.primaryGreen.withOpacity(0.16),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: PosAppTheme.primaryGreen.withOpacity(0.35),
-          ),
-        ),
-        dividerColor: Colors.transparent,
-        labelStyle: const TextStyle(fontWeight: FontWeight.w700),
-        labelPadding: const EdgeInsets.symmetric(vertical: 8),
-        tabs: const [
-          Tab(icon: Icon(Icons.store), text: 'Shop'),
-          Tab(icon: Icon(Icons.people_alt), text: 'Users'),
-          Tab(icon: Icon(Icons.backup), text: 'Backup'),
-          Tab(icon: Icon(Icons.cloud), text: 'Cloud'),
-          Tab(icon: Icon(Icons.info), text: 'About'),
-        ],
-      ),
-    );
+  Widget _buildActivePane() {
+    switch (_selectedPane) {
+      case 0:
+        return _buildShopSettings();
+      case 1:
+        return _buildPrinterSettings();
+      case 2:
+        return _buildNetworkPane();
+      case 3:
+        return _buildUserManagement();
+      case 4:
+        return _buildBackupSettings();
+      case 5:
+        return _buildCloudSettings();
+      case 6:
+        return _buildTechnicalPane();
+      case 8:
+        return _buildCashDrawerSettings();
+      default:
+        return _buildAbout();
+    }
   }
 
   Widget _buildPrinterSelector(SettingsProvider settingsProvider) {
@@ -467,7 +604,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         '===== TEST PRINT =====\nRandil Grocery POS\nPrinter OK\n'
                         '${DateTime.now()}\n',
                         selected);
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    showTopSnackBar(context, 
                       SnackBar(
                         content: Text(ok
                             ? 'Test print sent to $selected'
@@ -767,7 +904,7 @@ Row(
         .read<NetworkProvider>()
         .applySettings(settingsProvider.settings);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         SnackBar(
           content: Text(
             settingsProvider.settings.isServerMode
@@ -782,110 +919,95 @@ Row(
 
   Widget _buildCloudSettings() {
     final cloud = SupabaseSyncService.instance;
+    final colors = context.appColors;
+    final t = context.typography;
     return SingleChildScrollView(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _buildSectionBanner(
-            icon: Icons.cloud,
-            title: 'Cloud Sync',
+          const AppSectionHeader(
+            title: 'Cloud sync',
             subtitle:
                 'Push sales, stock, customers, refunds, GRNs and expenses to the phone app',
-            gradient: const [Color(0xFF0F2027), Color(0xFF203A43)],
+            icon: Icons.cloud,
           ),
-          const SizedBox(height: 12),
-          GroceryCard(
-            borderRadius: BorderRadius.circular(12),
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text(
-                      'Enable cloud sync',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    subtitle: Text(
-                      cloud.enabled
-                          ? 'ON - data is being pushed to the phone app'
-                          : 'OFF - the phone app will not receive data',
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    value: _enableCloudSync,
-                    activeTrackColor: PosAppTheme.primaryGreen,
-                    onChanged: (value) => setState(() => _enableCloudSync = value),
-                  ),
-                  const SizedBox(height: 8),
-                  GroceryTextField(
-                    label: 'Supabase URL',
-                    controller: _cloudUrlController,
-                    hint: 'https://xxxx.supabase.co',
-                    keyboardType: TextInputType.url,
-                  ),
-                  const SizedBox(height: 10),
-                  GroceryTextField(
-                    label: 'Supabase Anon Key',
-                    controller: _cloudAnonController,
-                    hint: 'eyJhbGciOi...',
-                    keyboardType: TextInputType.visiblePassword,
-                  ),
-                  const SizedBox(height: 10),
-                  _buildCloudStatus(cloud),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: _cloudBusy
-                          ? null
-                          : () async {
-                              setState(() => _cloudBusy = true);
-                              await SupabaseSyncService.instance.configure(
-                                url: _cloudUrlController.text,
-                                anonKey: _cloudAnonController.text,
-                                enabled: _enableCloudSync,
-                              );
-                              if (mounted) {
-                                setState(() => _cloudBusy = false);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      SupabaseSyncService.instance.lastError ==
-                                              null
-                                          ? 'Cloud sync saved & pushed'
-                                          : 'Saved, but push failed: ${SupabaseSyncService.instance.lastError}',
-                                    ),
-                                    backgroundColor:
-                                        SupabaseSyncService.instance.lastError ==
-                                                null
-                                            ? PosAppTheme.successGreen
-                                            : PosAppTheme.dangerRed,
+          AppCard(
+            padding: const EdgeInsets.all(AppSpacing.md),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildSettingToggleTile(
+                  title: 'Enable cloud sync',
+                  subtitle: cloud.enabled
+                      ? 'Data is being pushed to the phone app'
+                      : 'The phone app will not receive data',
+                  icon: Icons.cloud_sync,
+                  value: _enableCloudSync,
+                  onChanged: (value) =>
+                      setState(() => _enableCloudSync = value),
+                ),
+                const SizedBox(height: AppSpacing.md),
+                GroceryTextField(
+                  label: 'Supabase URL',
+                  controller: _cloudUrlController,
+                  hint: 'https://xxxx.supabase.co',
+                  keyboardType: TextInputType.url,
+                ),
+                const SizedBox(height: AppSpacing.md),
+                GroceryTextField(
+                  label: 'Supabase Anon Key',
+                  controller: _cloudAnonController,
+                  hint: 'eyJhbGciOi...',
+                  keyboardType: TextInputType.visiblePassword,
+                ),
+                const SizedBox(height: AppSpacing.md),
+                _buildCloudStatus(cloud),
+                const SizedBox(height: AppSpacing.md),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _cloudBusy
+                        ? null
+                        : () async {
+                            setState(() => _cloudBusy = true);
+                            await SupabaseSyncService.instance.configure(
+                              url: _cloudUrlController.text,
+                              anonKey: _cloudAnonController.text,
+                              enabled: _enableCloudSync,
+                            );
+                            if (mounted) {
+                              setState(() => _cloudBusy = false);
+                              final failed = SupabaseSyncService
+                                      .instance.lastError !=
+                                  null;
+                              showTopSnackBar(context,
+                                SnackBar(
+                                  content: Text(
+                                    failed
+                                        ? 'Saved, but push failed: ${SupabaseSyncService.instance.lastError}'
+                                        : 'Cloud sync saved & pushed',
                                   ),
-                                );
-                              }
-                            },
-                      icon: const Icon(Icons.cloud_upload),
-                      label: Text(_cloudBusy ? 'Syncing...' : 'Save & Sync Now'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: PosAppTheme.primaryGreen,
-                      ),
+                                  backgroundColor: failed
+                                      ? colors.danger
+                                      : colors.success,
+                                ),
+                              );
+                            }
+                          },
+                    icon: const Icon(Icons.cloud_upload),
+                    label: Text(
+                      _cloudBusy ? 'Syncing...' : 'Save & Sync Now',
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Everything is pre-filled for this shop.\n'
-                    '1. Create a free project at supabase.com\n'
-                    '2. Open SQL Editor and run the script in the repo folder\n'
-                    '   docs / supabase_schema.sql (adds the daily_routines table)\n'
-                    '3. Save & Sync Now - that is all.\n'
-                    'To keep the free tier small, background sync every 15 '
-                    'minutes only sends NEW records plus a 1-row daily '
-                    'routine summary for the phone app.\n',
-                    style: TextStyle(fontSize: 12, color: PosAppTheme.textGray),
-                  ),
-                ],
-              ),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Text(
+                  'Background sync every 15 minutes only sends new '
+                  'records plus a 1-row daily routine summary for the '
+                  'phone app, keeping the free tier small.',
+                  style: t.caption.copyWith(color: colors.textTertiary),
+                ),
+              ],
             ),
           ),
         ],
@@ -894,34 +1016,32 @@ Row(
   }
 
   Widget _buildCloudStatus(SupabaseSyncService cloud) {
+    final colors = context.appColors;
+    final t = context.typography;
     final Color color;
     final IconData icon;
     final String text;
     if (cloud.lastError != null) {
-      color = PosAppTheme.dangerRed;
+      color = colors.danger;
       icon = Icons.error_outline;
       text = 'Last sync failed: ${cloud.lastError}';
     } else if (cloud.lastSync != null) {
-      color = PosAppTheme.successGreen;
+      color = colors.success;
       icon = Icons.cloud_done;
       text = 'Last successful sync: ${cloud.lastSync!.toLocal()}';
     } else {
-      color = PosAppTheme.textGray;
+      color = colors.textSecondary;
       icon = Icons.cloud_queue;
       text = cloud.enabled ? 'Sync has not run yet' : 'Cloud sync is off';
     }
     return Row(
       children: [
         Icon(icon, color: color, size: 20),
-        const SizedBox(width: 8),
+        const SizedBox(width: AppSpacing.sm),
         Expanded(
           child: Text(
             cloud.syncing ? 'Syncing now...' : text,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: color,
-            ),
+            style: t.body.copyWith(color: color),
           ),
         ),
       ],
@@ -929,263 +1049,583 @@ Row(
   }
 
   Widget _buildShopSettings() => Consumer<SettingsProvider>(
-        builder: (context, settingsProvider, child) => SingleChildScrollView(
+      builder: (context, settingsProvider, child) {
+        final colors = context.appColors;
+        final t = context.typography;
+        final settings = settingsProvider.settings;
+        return SingleChildScrollView(
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _buildSectionBanner(
-                icon: Icons.storefront,
-                title: 'Business Configuration',
-                subtitle: 'Store profile, tax rules, and bill-print behavior',
-                gradient: const [Color(0xFF11998E), Color(0xFF38EF7D)],
+              const AppSectionHeader(
+                title: 'Shop settings',
+                subtitle: 'Store profile shown on bills',
+                icon: Icons.store,
               ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: _buildKpiChip(
-                      title: 'Tax Status',
-                      value: settingsProvider.settings.enableTax ? 'Enabled' : 'Disabled',
-                      icon: Icons.percent,
-                      color: settingsProvider.settings.enableTax
-                          ? PosAppTheme.primaryGreen
-                          : PosAppTheme.textGray,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _buildKpiChip(
-                      title: 'Printer',
-                      value: settingsProvider.settings.enablePrinting ? 'Connected' : 'Off',
-                      icon: Icons.print,
-                      color: settingsProvider.settings.enablePrinting
-                          ? PosAppTheme.accentBlue
-                          : PosAppTheme.textGray,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              GroceryCard(
-                borderRadius: BorderRadius.circular(16),
+              AppCard(
+                padding: const EdgeInsets.all(AppSpacing.md),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Shop Details',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
+                    const AppSectionHeader(
+                      title: 'Shop details',
+                      dense: true,
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: AppSpacing.sm),
                     GroceryTextField(
                       label: 'Shop Name',
                       controller: _shopNameController,
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: AppSpacing.md),
                     GroceryTextField(
                       label: 'Address',
                       controller: _addressController,
                       maxLines: 2,
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: AppSpacing.md),
                     GroceryTextField(
                       label: 'Phone',
                       controller: _phoneController,
                       keyboardType: TextInputType.phone,
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: AppSpacing.md),
                     GroceryTextField(
                       label: 'Email',
                       controller: _emailController,
                       keyboardType: TextInputType.emailAddress,
                     ),
+                    const SizedBox(height: AppSpacing.md),
+                    Divider(color: colors.border),
+                    const SizedBox(height: AppSpacing.sm),
+                    Row(
+                      children: [
+                        Container(
+                          width: AppSizes.kpiIconChip,
+                          height: AppSizes.kpiIconChip,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: colors.primarySoft,
+                            borderRadius: AppRadius.controlRadius,
+                          ),
+                          child: Icon(
+                            Icons.payments_outlined,
+                            size: 18,
+                            color: colors.onPrimarySoft,
+                          ),
+                        ),
+                        const SizedBox(width: AppSpacing.sm),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Currency', style: t.bodyStrong),
+                              Text(
+                                '${settings.currencySymbol} ${settings.currency}',
+                                style: t.caption,
+                              ),
+                            ],
+                          ),
+                        ),
+                        Text(
+                          'Set at setup',
+                          style: t.caption.copyWith(
+                            color: colors.textTertiary,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: AppSpacing.md),
+                    if (_shopDirty) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppSpacing.sm,
+                          vertical: AppSpacing.xxs,
+                        ),
+                        decoration: BoxDecoration(
+                          color: colors.surfaceMuted,
+                          borderRadius: AppRadius.controlRadius,
+                          border: Border.all(color: colors.border),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.edit_outlined,
+                              size: 16,
+                              color: colors.warning,
+                            ),
+                            const SizedBox(width: AppSpacing.xs),
+                            Expanded(
+                              child: Text(
+                                'Unsaved changes',
+                                style: t.caption.copyWith(
+                                  color: colors.textSecondary,
+                                ),
+                              ),
+                            ),
+                            TextButton.icon(
+                              onPressed: _resetShopFields,
+                              style: TextButton.styleFrom(
+                                minimumSize: const Size(48, 44),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: AppSpacing.sm,
+                                ),
+                              ),
+                              icon: const Icon(Icons.undo, size: 18),
+                              label: const Text('Discard'),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.sm),
+                    ],
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _resetShopFields,
+                            style: OutlinedButton.styleFrom(
+                              minimumSize: const Size(48, 44),
+                            ),
+                            icon: const Icon(Icons.undo),
+                            label: const Text('Reset'),
+                          ),
+                        ),
+                        const SizedBox(width: AppSpacing.sm),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              minimumSize: const Size(48, 44),
+                            ),
+                            onPressed: () async {
+                              await settingsProvider.updateSettings(
+                                settingsProvider.settings.copyWith(
+                                  shopName: _shopNameController.text.trim(),
+                                  address: _addressController.text.trim(),
+                                  phone: _phoneController.text.trim(),
+                                  email: _emailController.text.trim(),
+                                ),
+                              );
+                              if (mounted) {
+                                setState(() => _shopDirty = false);
+                                showTopSnackBar(context,
+                                  SnackBar(
+                                    content: const Text(
+                                      'Settings updated successfully',
+                                    ),
+                                    backgroundColor: colors.success,
+                                  ),
+                                );
+                              }
+                            },
+                            icon: const Icon(Icons.save),
+                            label: const Text('Save Changes'),
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
-              const SizedBox(height: 14),
-              GroceryCard(
-                borderRadius: BorderRadius.circular(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Tax and Billing',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
+            ],
+          ),
+        );
+      },
+    );
+
+  Widget _buildPrinterSettings() => Consumer<SettingsProvider>(
+        builder: (context, settingsProvider, child) {
+          final settings = settingsProvider.settings;
+          final t = context.typography;
+          return SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const AppSectionHeader(
+                  title: 'Printer',
+                  subtitle: 'Receipt printing for bills',
+                  icon: Icons.print,
+                ),
+                AppCard(
+                  padding: const EdgeInsets.all(AppSpacing.md),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      AppSectionHeader(
+                        title: 'Billing printer',
+                        dense: true,
+                        action: StatusBadge(
+                          label: settings.enablePrinting
+                              ? 'Printing on'
+                              : 'Printing off',
+                          tone: settings.enablePrinting
+                              ? StatusTone.success
+                              : StatusTone.neutral,
+                          dense: true,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 10),
-                    _buildSettingToggleTile(
-                      title: 'Enable Tax',
-                      subtitle: 'Apply VAT/Tax in billing',
-                      icon: Icons.receipt_long,
-                      value: settingsProvider.settings.enableTax,
-                      onChanged: (value) {
-                        settingsProvider.updateTaxSettings(
-                          value,
-                          settingsProvider.settings.taxPercentage,
-                        );
-                      },
-                    ),
-                    if (settingsProvider.settings.enableTax) ...[
-                      const SizedBox(height: 10),
-                      GroceryTextField(
-                        label: 'Tax Percentage',
-                        controller: _taxPercentageController,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
+                      const SizedBox(height: AppSpacing.sm),
+                      _buildSettingToggleTile(
+                        title: 'Enable Printer',
+                        subtitle: 'Use connected printer for bills',
+                        icon: Icons.print,
+                        value: settings.enablePrinting,
+                        onChanged: (value) {
+                          settingsProvider.updatePrinterSettings(
+                            settingsProvider.settings.printerName,
+                            value,
+                          );
+                        },
+                      ),
+                      if (settings.enablePrinting) ...[
+                        const SizedBox(height: AppSpacing.md),
+                        _buildPrinterSelector(settingsProvider),
+                      ],
+                      const SizedBox(height: AppSpacing.md),
+                      Text(
+                        'Paper width',
+                        style: t.caption.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.xxs),
+                      DropdownButtonFormField<int>(
+                        initialValue: settings.paperWidth,
+                        isExpanded: true,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: AppSpacing.sm,
+                            vertical: 10,
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: AppRadius.controlRadius,
+                          ),
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 78,
+                            child: Text('78 mm'),
+                          ),
+                          DropdownMenuItem(
+                            value: 80,
+                            child: Text('80 mm'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null &&
+                              value != settings.paperWidth) {
+                            settingsProvider.updateSettings(
+                              settingsProvider.settings
+                                  .copyWith(paperWidth: value),
+                            );
+                          }
+                        },
+                      ),
+                      const SizedBox(height: AppSpacing.xxs),
+                      Text(
+                        'Most "80 mm" receipt printers print on 78 mm '
+                        'wide rolls. Pick the width that matches this shop.',
+                        style: t.caption.copyWith(
+                          color: context.appColors.textTertiary,
                         ),
                       ),
                     ],
-                    const SizedBox(height: 10),
-                    _buildSettingToggleTile(
-                      title: 'Enable Printer',
-                      subtitle: 'Use connected printer for bills',
-                      icon: Icons.print,
-                      value: settingsProvider.settings.enablePrinting,
-                      onChanged: (value) {
-                        settingsProvider.updatePrinterSettings(
-                          settingsProvider.settings.printerName,
-                          value,
-                        );
-                      },
-                    ),
-                    if (settingsProvider.settings.enablePrinting) ...[
-                      const SizedBox(height: 10),
-                      _buildPrinterSelector(settingsProvider),
-                    ],
-                  ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 14),
-              _buildNetworkSettings(settingsProvider),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _initializeControllers,
-                      icon: const Icon(Icons.undo),
-                      label: const Text('Reset'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: () async {
-                        final tax = double.tryParse(_taxPercentageController.text);
-                        await settingsProvider.updateSettings(
-                          settingsProvider.settings.copyWith(
-                            shopName: _shopNameController.text.trim(),
-                            address: _addressController.text.trim(),
-                            phone: _phoneController.text.trim(),
-                            email: _emailController.text.trim(),
-                            taxPercentage: tax ?? settingsProvider.settings.taxPercentage,
-                          ),
-                        );
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Settings updated successfully'),
-                              backgroundColor: PosAppTheme.successGreen,
-                            ),
-                          );
-                        }
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: PosAppTheme.primaryGreen,
+              ],
+            ),
+          );
+        },
+      );
+
+  Widget _buildCashDrawerSettings() => Consumer<SettingsProvider>(
+        builder: (context, settingsProvider, child) {
+          final settings = settingsProvider.settings;
+          final t = context.typography;
+          final colors = context.appColors;
+          return SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const AppSectionHeader(
+                  title: 'Cash Drawer',
+                  subtitle: 'Open the till when a sale completes',
+                  icon: Icons.point_of_sale,
+                ),
+                AppCard(
+                  padding: const EdgeInsets.all(AppSpacing.md),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildSettingToggleTile(
+                        title: 'Open drawer after sale',
+                        subtitle: 'Pop the till whenever the cashier completes a payment',
+                        icon: Icons.currency_exchange,
+                        value: settings.cashDrawerEnabled,
+                        onChanged: (value) {
+                          settingsProvider.updateCashDrawerSettings(
+                              enabled: value);
+                        },
                       ),
-                      icon: const Icon(Icons.save),
-                      label: const Text('Save Changes'),
-                    ),
+                      if (settings.cashDrawerEnabled) ...[
+                        const SizedBox(height: AppSpacing.md),
+                        _buildSettingToggleTile(
+                          title: 'Card-only payments only',
+                          subtitle: 'Keep the drawer shut on cash sales; open it '
+                              'for card-only bills',
+                          icon: Icons.credit_card,
+                          value: settings.cashDrawerOpenOnCardOnly,
+                          onChanged: (value) {
+                            settingsProvider.updateCashDrawerSettings(
+                                openOnCardOnly: value);
+                          },
+                        ),
+                        const SizedBox(height: AppSpacing.md),
+                        Text(
+                          'Drawer pin on the printer (ESC/POS m)',
+                          style: t.caption.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: AppSpacing.xxs),
+                        DropdownButtonFormField<int>(
+                          initialValue: settings.cashDrawerPin,
+                          isExpanded: true,
+                          decoration: InputDecoration(
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: AppSpacing.sm,
+                              vertical: 10,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: AppRadius.controlRadius,
+                            ),
+                          ),
+                          items: const [
+                            DropdownMenuItem(value: 2, child: Text('Pin 2')),
+                            DropdownMenuItem(value: 5, child: Text('Pin 5')),
+                          ],
+                          onChanged: (value) {
+                            if (value != null && value != settings.cashDrawerPin) {
+                              settingsProvider.updateCashDrawerSettings(
+                                  pin: value);
+                            }
+                          },
+                        ),
+                        const SizedBox(height: AppSpacing.md),
+                        Text(
+                          'Pulse timing',
+                          style: t.caption.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: AppSpacing.xxs),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: DropdownButtonFormField<int>(
+                                initialValue: settings.cashDrawerPulseOnMs,
+                                isExpanded: true,
+                                decoration: InputDecoration(
+                                  isDense: true,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: AppSpacing.sm,
+                                    vertical: 10,
+                                  ),
+                                  border: OutlineInputBorder(
+                                    borderRadius: AppRadius.controlRadius,
+                                  ),
+                                ),
+                                items: const [
+                                  DropdownMenuItem(
+                                      value: 80, child: Text('80 ms on')),
+                                  DropdownMenuItem(
+                                      value: 120, child: Text('120 ms on')),
+                                  DropdownMenuItem(
+                                      value: 150, child: Text('150 ms on')),
+                                  DropdownMenuItem(
+                                      value: 180, child: Text('180 ms on')),
+                                ],
+                                onChanged: (value) {
+                                  if (value != null &&
+                                      value != settings.cashDrawerPulseOnMs) {
+                                    settingsProvider.updateCashDrawerSettings(
+                                        pulseOnMs: value);
+                                  }
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: AppSpacing.sm),
+                            Expanded(
+                              child: DropdownButtonFormField<int>(
+                                initialValue: settings.cashDrawerPulseOffMs,
+                                isExpanded: true,
+                                decoration: InputDecoration(
+                                  isDense: true,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: AppSpacing.sm,
+                                    vertical: 10,
+                                  ),
+                                  border: OutlineInputBorder(
+                                    borderRadius: AppRadius.controlRadius,
+                                  ),
+                                ),
+                                items: const [
+                                  DropdownMenuItem(
+                                      value: 200, child: Text('200 ms off')),
+                                  DropdownMenuItem(
+                                      value: 240, child: Text('240 ms off')),
+                                  DropdownMenuItem(
+                                      value: 300, child: Text('300 ms off')),
+                                ],
+                                onChanged: (value) {
+                                  if (value != null &&
+                                      value != settings.cashDrawerPulseOffMs) {
+                                    settingsProvider.updateCashDrawerSettings(
+                                        pulseOffMs: value);
+                                  }
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: AppSpacing.md),
+                        Text(
+                          'Printer that drives the drawer',
+                          style: t.caption.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: AppSpacing.xxs),
+                        DropdownButtonFormField<String>(
+                          initialValue: settings.cashDrawerPrinterName.isEmpty
+                              ? null
+                              : settings.cashDrawerPrinterName,
+                          isExpanded: true,
+                          decoration: InputDecoration(
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: AppSpacing.sm,
+                              vertical: 10,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: AppRadius.controlRadius,
+                            ),
+                          ),
+                          items: [
+                            const DropdownMenuItem<String>(
+                              value: '',
+                              child: Text('Use billing printer'),
+                            ),
+                            for (final p in _printers)
+                              DropdownMenuItem(value: p, child: Text(p)),
+                          ],
+                          onChanged: (value) {
+                            if (value != null) {
+                              settingsProvider.updateCashDrawerSettings(
+                                  printerName: value);
+                            }
+                          },
+                        ),
+                        const SizedBox(height: AppSpacing.md),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () async {
+                                  final result = await CashDrawerService()
+                                      .openManually(settingsProvider.settings);
+                                  if (!context.mounted) return;
+                                  showTopSnackBar(
+                                    context,
+                                    SnackBar(
+                                      content: Text(
+                                        result.wasSent
+                                            ? 'Drawer pulse sent'
+                                            : 'Drawer pulse not sent: '
+                                                '${result.message.isEmpty ? CashDrawerService().lastError ?? 'check the printer' : result.message}',
+                                        style: TextStyle(
+                                          color: result.wasSent
+                                              ? colors.success
+                                              : colors.danger,
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.point_of_sale),
+                                label: const Text('Test drawer'),
+                              ),
+                            ),
+                            const SizedBox(width: AppSpacing.sm),
+                            Expanded(
+                              child: Text(
+                                'Test opens the drawer without touching '
+                                'stock or sales.',
+                                style: t.caption,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
                   ),
-                ],
+                ),
+              ],
+            ),
+          );
+        },
+      );
+
+  Widget _buildNetworkPane() => Consumer<SettingsProvider>(
+        builder: (context, settingsProvider, child) => SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const AppSectionHeader(
+                title: 'Network',
+                subtitle: 'Multi-PC & live sync',
+                icon: Icons.lan,
               ),
+              _buildNetworkSettings(settingsProvider),
             ],
           ),
         ),
       );
 
   Widget _buildUserManagement() => Consumer<AuthProvider>(
-        builder: (context, authProvider, child) => FutureBuilder<List<dynamic>>(
-          future: authProvider.getAllUsers(),
-          builder: (context, snapshot) {
-            if (!snapshot.hasData) {
-              return const Center(child: CircularProgressIndicator());
-            }
-
-            final users = snapshot.data ?? [];
-            final adminCount = users
-                .where((u) => u.role.toString().toLowerCase().contains('admin'))
-                .length;
-            final staffCount = users.length - adminCount;
-
-            return Column(
+        builder: (context, authProvider, child) {
+          final colors = context.appColors;
+          final t = context.typography;
+          _usersFuture ??= authProvider.getAllUsers();
+          return SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _buildSectionBanner(
-                  icon: Icons.manage_accounts,
-                  title: 'User Access Control',
-                  subtitle: 'Manage cashier/admin roles and account access',
-                  gradient: const [Color(0xFF4568DC), Color(0xFFB06AB3)],
+                const AppSectionHeader(
+                  title: 'Users',
+                  subtitle: 'Cashier and admin roles, account access',
+                  icon: Icons.people_alt,
                 ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _buildKpiChip(
-                        title: 'Total Users',
-                        value: users.length.toString(),
-                        icon: Icons.groups,
-                        color: PosAppTheme.primaryGreen,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _buildKpiChip(
-                        title: 'Admins',
-                        value: adminCount.toString(),
-                        icon: Icons.security,
-                        color: PosAppTheme.warningOrange,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _buildKpiChip(
-                        title: 'Staff',
-                        value: staffCount.toString(),
-                        icon: Icons.person,
-                        color: PosAppTheme.accentBlue,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
                 Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(14),
+                  padding: const EdgeInsets.all(AppSpacing.md),
                   decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: PosAppTheme.borderGray),
+                    color: colors.surface,
+                    borderRadius: AppRadius.cardRadius,
+                    border: Border.all(color: colors.border),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Expanded(
+                      Expanded(
                         child: Text(
                           'Manage system users and access roles',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            color: PosAppTheme.textDark,
-                          ),
+                          style: t.bodyStrong,
                         ),
                       ),
-                        const SizedBox(width: 12),
+                      const SizedBox(width: AppSpacing.sm),
                       if (authProvider.isAdmin)
-                        ElevatedButton.icon(
+                        FilledButton.icon(
                           onPressed: () => _showAddUserDialog(authProvider),
                           icon: const Icon(Icons.add),
                           label: const Text('Add User'),
@@ -1193,135 +1633,190 @@ Row(
                     ],
                   ),
                 ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: users.length,
-                    itemBuilder: (context, index) {
-                      final user = users[index];
-                      final role = user.role.toString().split('.').last;
-                      final isAdminRole = role.toLowerCase() == 'admin';
-
-                      return GroceryCard(
-                        borderRadius: BorderRadius.circular(14),
-                        backgroundColor: isAdminRole
-                            ? PosAppTheme.warningOrange.withOpacity(0.06)
-                            : Colors.white,
-                        child: Row(
+                const SizedBox(height: AppSpacing.sm),
+                AppAsync<List<dynamic>>(
+                  future: _usersFuture,
+                  loading: const SkeletonList(rows: 5),
+                  isEmpty: (users) => users.isEmpty,
+                  emptyIcon: Icons.person_off,
+                  emptyTitle: 'No users yet',
+                  emptyMessage:
+                      'Add the first cashier or admin to get started.',
+                  emptyAction: authProvider.isAdmin
+                      ? FilledButton.icon(
+                          onPressed: () => _showAddUserDialog(authProvider),
+                          icon: const Icon(Icons.person_add),
+                          label: const Text('Add User'),
+                        )
+                      : null,
+                  onRetry: _reloadUsers,
+                  builder: (context, users) {
+                    final adminCount = users
+                        .where((u) => u.role.toString().toLowerCase().contains('admin'))
+                        .length;
+                    final staffCount = users.length - adminCount;
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
                           children: [
-                            CircleAvatar(
-                              backgroundColor:
-                                  (isAdminRole
-                                          ? PosAppTheme.warningOrange
-                                          : PosAppTheme.primaryGreen)
-                                      .withOpacity(0.18),
-                              child: Icon(
-                                isAdminRole ? Icons.security : Icons.person,
-                                color: isAdminRole
-                                    ? PosAppTheme.warningOrange
-                                    : PosAppTheme.primaryGreen,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
                             Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    user.fullName,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  Text(
-                                    '@${user.username}',
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      color: PosAppTheme.textGray,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 3,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: (isAdminRole
-                                              ? PosAppTheme.warningOrange
-                                              : PosAppTheme.primaryGreen)
-                                          .withOpacity(0.14),
-                                      borderRadius: BorderRadius.circular(16),
-                                    ),
-                                    child: Text(
-                                      role.toUpperCase(),
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: isAdminRole
-                                            ? PosAppTheme.warningOrange
-                                            : PosAppTheme.primaryGreen,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ),
-                                  if (!user.isActive) ...[
-                                    const SizedBox(height: 4),
-                                    const Text(
-                                      'INACTIVE',
-                                      style: TextStyle(
-                                        fontSize: 10,
-                                        color: PosAppTheme.dangerRed,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ],
-                                ],
+                              child: KpiCard(
+                                label: 'Total users',
+                                value: '${users.length}',
+                                icon: Icons.groups,
+                                tone: StatusTone.primary,
                               ),
                             ),
-                            if (authProvider.isAdmin)
-                              PopupMenuButton(
-                                icon: const Icon(Icons.more_horiz),
-                                onSelected: (value) {
-                                  if (value == 'edit') {
-                                    _showEditUserDialog(
-                                        authProvider, users, user);
-                                  } else if (value == 'delete') {
-                                    _confirmDeleteUser(authProvider, user);
-                                  } else if (value == 'toggle') {
-                                    authProvider.updateUser(
-                                      id: user.id,
-                                      isActive: !user.isActive,
-                                    );
-                                  }
-                                },
-                                itemBuilder: (context) => [
-                                  const PopupMenuItem(
-                                    value: 'edit',
-                                    child: Text('Edit'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'toggle',
-                                    child: Text(user.isActive
-                                        ? 'Deactivate'
-                                        : 'Activate'),
-                                  ),
-                                  const PopupMenuItem(
-                                    value: 'delete',
-                                    child: Text('Delete'),
-                                  ),
-                                ],
+                            const SizedBox(width: AppSpacing.gutter),
+                            Expanded(
+                              child: KpiCard(
+                                label: 'Admins',
+                                value: '$adminCount',
+                                icon: Icons.security,
+                                tone: StatusTone.warning,
                               ),
+                            ),
+                            const SizedBox(width: AppSpacing.gutter),
+                            Expanded(
+                              child: KpiCard(
+                                label: 'Staff',
+                                value: '$staffCount',
+                                icon: Icons.person_outline,
+                                tone: StatusTone.neutral,
+                              ),
+                            ),
                           ],
                         ),
-                      );
-                    },
-                  ),
+                        const SizedBox(height: AppSpacing.sm),
+                        for (var i = 0; i < users.length; i++)
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              bottom: AppSpacing.xs,
+                            ),
+                            child: _userRow(
+                              context,
+                              authProvider,
+                              users,
+                              users[i],
+                            ),
+                          ),
+                      ],
+                    );
+                  },
                 ),
               ],
-            );
-          },
-        ),
+            ),
+          );
+        },
       );
+
+  Widget _userRow(
+    BuildContext context,
+    AuthProvider authProvider,
+    List<dynamic> users,
+    dynamic user,
+  ) {
+    final colors = context.appColors;
+    final t = context.typography;
+    final role = user.role.toString().split('.').last;
+    final isAdminRole = role.toLowerCase() == 'admin';
+    final accent = isAdminRole ? colors.warning : colors.primary;
+    final inactive = user.isActive == false;
+
+    return AppCard(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.md,
+        vertical: AppSpacing.sm,
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.16),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              isAdminRole ? Icons.security : Icons.person,
+              size: 18,
+              color: accent,
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  user.fullName as String,
+                  style: t.bodyStrong,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text('@${user.username}', style: t.caption),
+              ],
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          StatusBadge(
+            label: role.toUpperCase(),
+            tone: isAdminRole ? StatusTone.warning : StatusTone.success,
+            dense: true,
+          ),
+          if (inactive) ...[
+            const SizedBox(width: AppSpacing.xs),
+            StatusBadge(
+              label: 'Inactive',
+              tone: StatusTone.danger,
+              dense: true,
+            ),
+          ],
+          if (authProvider.isAdmin)
+            PopupMenuButton<String>(
+              tooltip: 'User actions',
+              icon: const Icon(Icons.more_horiz),
+              onSelected: (value) {
+                if (value == 'edit') {
+                  _showEditUserDialog(authProvider, users, user);
+                } else if (value == 'delete') {
+                  _confirmDeleteUser(authProvider, user);
+                } else if (value == 'toggle') {
+                  _toggleUser(authProvider, user);
+                }
+              },
+              itemBuilder: (context) => [
+                const PopupMenuItem(value: 'edit', child: Text('Edit')),
+                PopupMenuItem(
+                  value: 'toggle',
+                  child: Text(inactive ? 'Activate' : 'Deactivate'),
+                ),
+                const PopupMenuItem(value: 'delete', child: Text('Delete')),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _toggleUser(AuthProvider authProvider, dynamic user) async {
+    final ok = await authProvider.updateUser(
+      id: user.id,
+      isActive: !(user.isActive ?? true),
+    );
+    if (!mounted) {
+      return;
+    }
+    _reloadUsers();
+    if (!ok) {
+      showTopSnackBar(
+        context,
+        const SnackBar(content: Text('Could not update the user')),
+      );
+    }
+  }
 
   Future<void> _showAddUserDialog(AuthProvider authProvider) async {
     final usernameController = TextEditingController();
@@ -1409,18 +1904,18 @@ Row(
                 final confirm = confirmController.text;
 
                 if (username.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  showTopSnackBar(context, const SnackBar(
                       content: Text('Username is required')));
                   return;
                 }
                 if (password.length < 6) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  showTopSnackBar(context, const SnackBar(
                       content: Text(
                           'Password must be at least 6 characters')));
                   return;
                 }
                 if (password != confirm) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  showTopSnackBar(context, 
                       const SnackBar(content: Text('Passwords do not match')));
                   return;
                 }
@@ -1445,9 +1940,10 @@ Row(
         fullName: success.$2,
       );
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      showTopSnackBar(context, SnackBar(
           content:
               Text(ok ? 'User created' : 'Username already exists')));
+      _reloadUsers();
     }
   }
 
@@ -1538,7 +2034,7 @@ Row(
                 );
                 if (context.mounted) {
                   Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  showTopSnackBar(context, SnackBar(
                       content: Text(ok ? 'User updated' : 'Update failed')));
                 }
               },
@@ -1549,44 +2045,38 @@ Row(
         ),
       ),
     );
+    if (mounted) {
+      _reloadUsers();
+    }
   }
 
   Future<void> _confirmDeleteUser(AuthProvider authProvider, dynamic user) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete User'),
-        content: Text(
-            'Are you sure you want to delete @${user.username}? This cannot be undone.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: PosAppTheme.dangerRed,
-            ),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await AppConfirmDialog.show(
+      context,
+      title: 'Delete @${user.username}?',
+      message: 'This removes the account. This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+      icon: Icons.person_off,
     );
 
-    if (confirmed == true) {
-      final ok = await authProvider.deleteUser(user.id);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(ok
-              ? 'User deleted'
-              : 'Cannot delete the last remaining admin')));
+    if (!confirmed) {
+      return;
     }
+    final ok = await authProvider.deleteUser(user.id);
+    if (!mounted) return;
+    showTopSnackBar(context, SnackBar(
+        content: Text(ok
+            ? 'User deleted'
+            : 'Cannot delete the last remaining admin')));
+    _reloadUsers();
   }
 
   Widget _buildBackupSettings() => Consumer<SettingsProvider>(
         builder: (context, settingsProvider, child) {
           final settings = settingsProvider.settings;
+          final colors = context.appColors;
+          final t = context.typography;
           final effectivePath = settings.backupLocalPath.trim().isEmpty
               ? BackupService.preferredWindowsBackupPath
               : settings.backupLocalPath;
@@ -1595,65 +2085,63 @@ Row(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildSectionBanner(
-                  icon: Icons.backup,
-                  title: 'Backup Configuration',
+                const AppSectionHeader(
+                  title: 'Backup',
                   subtitle:
-                      'Every change is saved locally, then pushed to the '
-                      'GitHub backup and Google Drive together every hour',
-                  gradient: const [Color(0xFF159957), Color(0xFF155799)],
+                      'Every transaction is snapshotted locally at once, '
+                      'then pushed to GitHub and Google Drive automatically',
+                  icon: Icons.backup,
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.sm),
+                _buildBackupStatusCard(),
+                const SizedBox(height: AppSpacing.sm),
                 Row(
                   children: [
                     Expanded(
-                      child: _buildKpiChip(
-                        title: 'Cloud Upload',
-                        value: _enableGoogleDriveBackup ? 'Enabled' : 'Disabled',
+                      child: KpiCard(
+                        label: 'Cloud upload',
+                        value: _enableGoogleDriveBackup
+                            ? 'Enabled'
+                            : 'Disabled',
                         icon: _enableGoogleDriveBackup
                             ? Icons.cloud_done
                             : Icons.cloud_off,
-                        color: _enableGoogleDriveBackup
-                            ? PosAppTheme.accentBlue
-                            : PosAppTheme.textGray,
+                        tone: _enableGoogleDriveBackup
+                            ? StatusTone.success
+                            : StatusTone.neutral,
                       ),
                     ),
-                    const SizedBox(width: 10),
+                    const SizedBox(width: AppSpacing.gutter),
                     Expanded(
-                      child: _buildKpiChip(
-                        title: 'Local Path',
+                      child: KpiCard(
+                        label: 'Local path',
                         value: settings.backupLocalPath.trim().isEmpty
                             ? 'Default'
                             : 'Custom',
                         icon: Icons.folder,
-                        color: PosAppTheme.primaryGreen,
+                        tone: StatusTone.primary,
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                GroceryCard(
-                  borderRadius: BorderRadius.circular(16),
+                const SizedBox(height: AppSpacing.sm),
+                AppCard(
+                  padding: const EdgeInsets.all(AppSpacing.md),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        'Storage and Cloud Settings',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
+                      const AppSectionHeader(
+                        title: 'Storage and cloud',
+                        dense: true,
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: AppSpacing.sm),
                       Text(
                         'Current target: $effectivePath',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: PosAppTheme.textGray,
+                        style: t.caption.copyWith(
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: AppSpacing.sm),
                       GroceryTextField(
                         label: 'Local Backup Folder',
                         hint: 'Leave empty to use default system folder',
@@ -1814,19 +2302,16 @@ Row(
                               );
 
                               if (mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
+                                showTopSnackBar(context, 
+                                  SnackBar(
+                                    content: const Text(
                                       'Backup settings saved successfully',
                                     ),
-                                    backgroundColor: PosAppTheme.successGreen,
+                                    backgroundColor: colors.success,
                                   ),
                                 );
                               }
                             },
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: PosAppTheme.primaryGreen,
-                            ),
                             icon: const Icon(Icons.save),
                             label: const Text('Save Backup Settings'),
                           ),
@@ -1839,9 +2324,6 @@ Row(
                         children: [
                           ElevatedButton.icon(
                             onPressed: _createBackupNowFromSettings,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: PosAppTheme.accentBlue,
-                            ),
                             icon: const Icon(Icons.backup),
                             label: const Text('Create Backup Now'),
                           ),
@@ -1872,212 +2354,327 @@ Row(
         },
       );
 
-  Widget _buildAbout() => SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildSectionBanner(
-              icon: Icons.dashboard_customize,
-              title: 'About This POS',
-              subtitle: 'Platform details, capabilities, and operational scope',
-              gradient: const [Color(0xFF1D976C), Color(0xFF93F9B9)],
-            ),
-            const SizedBox(height: 12),
-            GroceryCard(
-              borderRadius: BorderRadius.circular(16),
-              backgroundColor: PosAppTheme.lightGreen.withOpacity(0.45),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Randil Grocery POS',
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                      color: PosAppTheme.primaryGreen,
-                    ),
+
+  /// Live "what was saved and pushed" card, driven straight off
+  /// [BackupService.status] — no invented timestamps.
+  Widget _buildBackupStatusCard() {
+    return ValueListenableBuilder<BackupCloudStatus>(
+      valueListenable: BackupService.status,
+      builder: (context, s, _) {
+        final colors = context.appColors;
+        final t = context.typography;
+
+        final rows = <(IconData, String, String)>[
+          (
+            Icons.receipt_long,
+            'Last transaction',
+            s.lastTransactionAt == null
+                ? 'Not yet'
+                : _backupTime(s.lastTransactionAt!),
+          ),
+          (
+            Icons.folder_open,
+            'Local snapshot',
+            s.lastLocalSnapshotAt == null
+                ? 'Not yet'
+                : '${_backupTime(s.lastLocalSnapshotAt!)} · '
+                    '${s.localSnapshotCount} '
+                    'file${s.localSnapshotCount == 1 ? '' : 's'}',
+          ),
+          (
+            Icons.cloud_done,
+            'Drive push',
+            s.lastDrivePushAt == null
+                ? 'Never'
+                : _backupTime(s.lastDrivePushAt!),
+          ),
+          (
+            Icons.upload,
+            'GitHub push',
+            s.lastGithubPushAt == null
+                ? 'Never'
+                : _backupTime(s.lastGithubPushAt!),
+          ),
+        ];
+
+        return AppCard(
+          padding: const EdgeInsets.all(AppSpacing.md),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final r in rows)
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    vertical: AppSpacing.xs,
                   ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Version 1.0.0',
-                    style: TextStyle(fontSize: 14, color: PosAppTheme.textGray),
-                  ),
-                  const SizedBox(height: 14),
-                  const Text(
-                    'A modern Point of Sale system built with Flutter for Windows Desktop. Designed for grocery operations with inventory, sales, customer, and reporting workflows.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.5,
-                      color: PosAppTheme.textDark,
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: const [
-                      _FeaturePill('Fast Billing'),
-                      _FeaturePill('Inventory Tracking'),
-                      _FeaturePill('Barcode Ready'),
-                      _FeaturePill('Reports'),
-                      _FeaturePill('User Roles'),
-                      _FeaturePill('Backup Support'),
+                  child: Row(
+                    children: [
+                      Icon(r.$1, size: 18, color: colors.textSecondary),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(child: Text(r.$2, style: t.body)),
+                      Text(r.$3, style: t.numberSm),
                     ],
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 14),
-            const GroceryCard(
-              borderRadius: BorderRadius.all(Radius.circular(16)),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'System Information',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
-                  SizedBox(height: 12),
-                  _InfoRow(label: 'Platform', value: 'Windows Desktop'),
-                  SizedBox(height: 8),
-                  _InfoRow(label: 'Framework', value: 'Flutter'),
-                  SizedBox(height: 8),
-                  _InfoRow(label: 'Database', value: 'SQLite'),
-                  SizedBox(height: 8),
-                  _InfoRow(label: 'Support', value: 'Local Offline POS'),
-                ],
-              ),
-            ),
-            const SizedBox(height: 14),
-            GroceryCard(
-              borderRadius: BorderRadius.circular(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Commercial Highlights',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 12),
-                  _buildHighlightRow(
-                    icon: Icons.insights,
-                    title: 'Dashboard-Driven Operations',
-                    subtitle: 'Live KPIs, trend charts, and quick action controls',
-                  ),
-                  const SizedBox(height: 10),
-                  _buildHighlightRow(
-                    icon: Icons.assignment_return,
-                    title: 'Refund and Return Readiness',
-                    subtitle: 'Queue-based return flow with approval controls',
-                  ),
-                  const SizedBox(height: 10),
-                  _buildHighlightRow(
-                    icon: Icons.backup,
-                    title: 'Backup and Recovery',
-                    subtitle: 'Local backups with storage monitoring and cleanup',
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      );
-
-  Widget _buildSectionBanner({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required List<Color> gradient,
-  }) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: gradient,
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(icon, color: Colors.white),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                  ),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.86),
-                    fontSize: 12,
-                  ),
+              if (s.lastDriveError != null) ...[
+                const SizedBox(height: AppSpacing.xxs),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.error_outline,
+                      size: 16,
+                      color: colors.danger,
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(
+                        s.lastDriveError!,
+                        style: t.caption.copyWith(color: colors.danger),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
               ],
-            ),
+              if (s.lastGithubError != null) ...[
+                const SizedBox(height: AppSpacing.xxs),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.error_outline,
+                      size: 16,
+                      color: colors.danger,
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(
+                        s.lastGithubError!,
+                        style: t.caption.copyWith(color: colors.danger),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
-  Widget _buildKpiChip({
-    required String title,
-    required String value,
-    required IconData icon,
-    required Color color,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: PosAppTheme.borderGray),
-      ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.16),
-              borderRadius: BorderRadius.circular(8),
+  /// Compact "Today, 14:05" / "6/10 08:12" rendering for backup timestamps.
+  String _backupTime(DateTime d) {
+    final local = d.toLocal();
+    final now = DateTime.now();
+    final hm =
+        '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+    final sameDay = local.year == now.year &&
+        local.month == now.month &&
+        local.day == now.day;
+    return sameDay ? 'Today, $hm' : '${local.day}/${local.month} $hm';
+  }
+
+  /// Technical diagnostics. Collapses to an admin-only lock for non-admins;
+  /// for admins it shows real, provider/service-sourced values only (version
+  /// read from the EXE resource via win32, never a hardcoded string).
+  Widget _buildTechnicalPane() => Consumer<AuthProvider>(
+        builder: (context, authProvider, child) {
+          final colors = context.appColors;
+          final t = context.typography;
+          return SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const AppSectionHeader(
+                  title: 'Technical',
+                  subtitle: 'Diagnostics for the system provider',
+                  icon: Icons.settings_suggest,
+                ),
+                if (!authProvider.isAdmin)
+                  AppCard(
+                    padding: const EdgeInsets.all(AppSpacing.md),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: AppSizes.kpiIconChip,
+                          height: AppSizes.kpiIconChip,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: colors.surfaceMuted,
+                            borderRadius: AppRadius.controlRadius,
+                          ),
+                          child: Icon(
+                            Icons.lock_outline,
+                            size: 20,
+                            color: colors.textSecondary,
+                          ),
+                        ),
+                        const SizedBox(width: AppSpacing.sm),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Admin only', style: t.bodyStrong),
+                              Text(
+                                'Sign in with an admin account to view '
+                                'technical details.',
+                                style: t.caption.copyWith(
+                                  color: colors.textTertiary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  AppCard(
+                    padding: const EdgeInsets.all(AppSpacing.md),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const AppSectionHeader(
+                          title: 'System details',
+                          dense: true,
+                        ),
+                        const SizedBox(height: AppSpacing.xs),
+                        for (final r in _technicalRows)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              vertical: AppSpacing.xs,
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Icon(
+                                  r.$1,
+                                  size: 18,
+                                  color: colors.primary,
+                                ),
+                                const SizedBox(width: AppSpacing.sm),
+                                SizedBox(
+                                  width: 140,
+                                  child: Text(r.$2, style: t.bodyStrong),
+                                ),
+                                Expanded(
+                                  child: Text(
+                                    r.$3,
+                                    style: t.body.copyWith(
+                                      color: colors.textSecondary,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+              ],
             ),
-            child: Icon(icon, size: 16, color: color),
+          );
+        },
+      );
+
+  static final List<(IconData, String, String)> _technicalRows =
+      <(IconData, String, String)>[
+    (Icons.tag, 'App version', _readExeFileVersion()),
+    (
+      Icons.computer_outlined,
+      'Operating system',
+      Platform.operatingSystemVersion,
+    ),
+    (
+      Icons.insert_drive_file_outlined,
+      'Executable',
+      Platform.resolvedExecutable,
+    ),
+  ];
+
+  Widget _buildAbout() {
+    _dbInfoFuture ??= _databaseInfo();
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const AppSectionHeader(
+            title: 'About RandilPOS',
+            subtitle:
+                'System details and who to contact for support or updates.',
+            icon: Icons.info_outline,
           ),
-          const SizedBox(width: 10),
-          Expanded(
+          AppCard(
+            padding: const EdgeInsets.all(AppSpacing.md),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  title,
-                  style: const TextStyle(fontSize: 11, color: PosAppTheme.textGray),
+                const AppSectionHeader(
+                  title: 'System details',
+                  dense: true,
                 ),
-                Text(
-                  value,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: PosAppTheme.textDark,
-                  ),
+                const SizedBox(height: AppSpacing.xs),
+                const _AboutRow(
+                  icon: Icons.point_of_sale,
+                  label: 'System',
+                  value: 'RandilPOS Grocery Point of Sale',
+                ),
+                _AboutRow(
+                  icon: Icons.tag,
+                  label: 'Version',
+                  value: _readExeFileVersion(),
+                ),
+                FutureBuilder<(String, String)>(
+                  future: _dbInfoFuture,
+                  builder: (context, snapshot) {
+                    final data = snapshot.data;
+                    if (data == null) {
+                      return const _AboutRow(
+                        icon: Icons.storage,
+                        label: 'Database',
+                        value: 'Loading…',
+                      );
+                    }
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _AboutRow(
+                          icon: Icons.folder_open,
+                          label: 'Database path',
+                          value: data.$1,
+                        ),
+                        _AboutRow(
+                          icon: Icons.data_usage,
+                          label: 'Database size',
+                          value: data.$2,
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                const _AboutRow(
+                  icon: Icons.engineering,
+                  label: 'Developed by',
+                  value: 'Jerusha Sharon',
+                ),
+                const _AboutRow(
+                  icon: Icons.phone_outlined,
+                  label: 'Support phone',
+                  value: '070-30 27 611',
+                ),
+                const _AboutRow(
+                  icon: Icons.email_outlined,
+                  label: 'Support email',
+                  value: 'jerushasharon1999@gmail.com',
+                ),
+                const _AboutRow(
+                  icon: Icons.support_agent,
+                  label: 'Support',
+                  value: 'Contact your system provider for help, updates '
+                      'and new feature requests.',
                 ),
               ],
             ),
@@ -2094,106 +2691,103 @@ Row(
     required bool value,
     required ValueChanged<bool> onChanged,
   }) {
+    final colors = context.appColors;
+    final t = context.typography;
     return Container(
       decoration: BoxDecoration(
-        color: PosAppTheme.bgColor,
-        borderRadius: BorderRadius.circular(12),
+        color: colors.surfaceMuted,
+        borderRadius: AppRadius.controlRadius,
       ),
       child: SwitchListTile(
-        title: Text(title),
-        subtitle: Text(subtitle),
+        title: Text(title, style: t.bodyStrong),
+        subtitle: Text(subtitle, style: t.caption),
         value: value,
-        secondary: Icon(icon, color: PosAppTheme.primaryGreen),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+        secondary: Icon(icon, color: colors.primary),
+        contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
         onChanged: onChanged,
       ),
     );
   }
 
-  Widget _buildHighlightRow({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-  }) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: PosAppTheme.primaryGreen.withOpacity(0.14),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Icon(icon, size: 18, color: PosAppTheme.primaryGreen),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                subtitle,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: PosAppTheme.textGray,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
 }
 
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({required this.label, required this.value});
+class _AboutRow extends StatelessWidget {
+  const _AboutRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
 
+  final IconData icon;
   final String label;
   final String value;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(label),
-        Text(
-          value,
-          style: const TextStyle(fontWeight: FontWeight.w600),
-        ),
-      ],
+    final colors = context.appColors;
+    final t = context.typography;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxs),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: colors.primary, size: 20),
+          const SizedBox(width: AppSpacing.sm),
+          SizedBox(
+            width: 140,
+            child: Text(label, style: t.bodyStrong),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: t.body.copyWith(color: colors.textSecondary),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
 
-class _FeaturePill extends StatelessWidget {
-  const _FeaturePill(this.label);
+/// A settings navigation group, e.g. BUSINESS. Items render under one label.
+class _SettingsNavSection {
+  const _SettingsNavSection(this.label, this.items);
 
   final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: PosAppTheme.borderGray),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          color: PosAppTheme.textDark,
-        ),
-      ),
-    );
-  }
+  final List<_SettingsNavItem> items;
 }
+
+/// One entry in the settings navigation. [index] is the pane id used by
+/// [_SettingsScreenState._selectedPane].
+class _SettingsNavItem {
+  const _SettingsNavItem(this.icon, this.label, this.index);
+
+  final IconData icon;
+  final String label;
+  final int index;
+}
+
+/// Grouped settings navigation in the two-pane layout.
+///
+/// Indices are final from day one so Printer, Network and Technical can slot
+/// into their panels without renumbering anything (Shop + Printer + Network
+/// are split out of the old Shop tab in the restyle steps).
+const _navSections = <_SettingsNavSection>[
+  _SettingsNavSection('Business', [
+    _SettingsNavItem(Icons.store, 'Shop settings', 0),
+    _SettingsNavItem(Icons.print, 'Printer', 1),
+    _SettingsNavItem(Icons.lan, 'Network', 2),
+  ]),
+  _SettingsNavSection('People', [
+    _SettingsNavItem(Icons.people_alt, 'Users', 3),
+  ]),
+  _SettingsNavSection('System', [
+    _SettingsNavItem(Icons.backup, 'Backup', 4),
+    _SettingsNavItem(Icons.cloud, 'Cloud sync', 5),
+    _SettingsNavItem(Icons.point_of_sale, 'Cash drawer', 8),
+    _SettingsNavItem(Icons.settings_suggest, 'Technical', 6),
+  ]),
+  _SettingsNavSection('Help', [
+    _SettingsNavItem(Icons.info_outline, 'About', 7),
+  ]),
+];

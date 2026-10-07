@@ -11,7 +11,7 @@ class CartItem { // discount is in percentage (0-100)
   }) : unitPrice = unitPrice ?? product.sellingPrice;
   final String id;
   final Product product;
-  int quantity;
+  double quantity;
   double discount;
 
   /// The price actually being charged for this line, resolved from the
@@ -28,7 +28,7 @@ class CartItem { // discount is in percentage (0-100)
   CartItem copyWith({
     String? id,
     Product? product,
-    int? quantity,
+    double? quantity,
     double? discount,
     double? unitPrice,
   }) => CartItem(

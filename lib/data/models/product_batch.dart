@@ -13,10 +13,12 @@ class ProductBatch {
     DateTime? receivedDate,
     this.notes = '',
     DateTime? createdAt,
+    double? initialQuantity,
   })  : id = id ?? const Uuid().v4(),
         sellingPrice = sellingPrice ?? 0,
         receivedDate = receivedDate ?? DateTime.now(),
-        createdAt = createdAt ?? DateTime.now();
+        createdAt = createdAt ?? DateTime.now(),
+        initialQuantity = initialQuantity ?? quantity;
 
   factory ProductBatch.fromMap(Map<String, dynamic> map) => ProductBatch(
         id: map['id'] as String,
@@ -29,7 +31,10 @@ class ProductBatch {
         expiryDate: map['expiryDate'] != null
             ? DateTime.parse(map['expiryDate'] as String)
             : null,
-        quantity: map['quantity'] as int,
+        quantity: (map['quantity'] as num).toDouble(),
+        initialQuantity:
+            (map['initialQuantity'] as num?)?.toDouble() ??
+                (map['quantity'] as num).toDouble(),
         receivedDate: DateTime.parse(map['receivedDate'] as String),
         supplierId: map['supplierId'] as String,
         notes: map['notes'] as String? ?? '',
@@ -41,7 +46,15 @@ class ProductBatch {
   final double price; // Cost price paid for this batch
   final double sellingPrice; // Retail price for this batch (0 = use product price)
   final DateTime? expiryDate;
-  final int quantity;
+  final double quantity;
+
+  /// Quantity originally received for this batch (0 on very old databases,
+  /// where only the remaining quantity was tracked).
+  final double initialQuantity;
+
+  /// Quantity already sold/used out of this batch.
+  double get usedQuantity =>
+      (initialQuantity - quantity).clamp(0.0, double.infinity);
   final DateTime receivedDate;
   final String supplierId;
   final String notes;
@@ -71,11 +84,12 @@ class ProductBatch {
     double? price,
     double? sellingPrice,
     DateTime? expiryDate,
-    int? quantity,
+    double? quantity,
     DateTime? receivedDate,
     String? supplierId,
     String? notes,
     DateTime? createdAt,
+    double? initialQuantity,
   }) =>
       ProductBatch(
         id: id ?? this.id,
@@ -89,6 +103,7 @@ class ProductBatch {
         supplierId: supplierId ?? this.supplierId,
         notes: notes ?? this.notes,
         createdAt: createdAt ?? this.createdAt,
+        initialQuantity: initialQuantity ?? this.initialQuantity,
       );
 
   Map<String, dynamic> toMap() => {
@@ -99,6 +114,7 @@ class ProductBatch {
         'sellingPrice': sellingPrice,
         'expiryDate': expiryDate?.toIso8601String(),
         'quantity': quantity,
+        'initialQuantity': initialQuantity,
         'receivedDate': receivedDate.toIso8601String(),
         'supplierId': supplierId,
         'notes': notes,
@@ -123,14 +139,14 @@ class BatchAllocation {
   factory BatchAllocation.fromMap(Map<String, dynamic> map) => BatchAllocation(
         batchId: map['batchId'] as String? ?? '',
         batchNumber: map['batchNumber'] as String? ?? '',
-        quantity: map['quantity'] as int? ?? 0,
+        quantity: (map['quantity'] as num?)?.toDouble() ?? 0,
         unitPrice: (map['unitPrice'] as num?)?.toDouble() ?? 0,
         costPrice: (map['costPrice'] as num?)?.toDouble() ?? 0,
       );
 
   final String batchId;
   final String batchNumber;
-  final int quantity;
+  final double quantity;
   final double unitPrice;
   final double costPrice;
 

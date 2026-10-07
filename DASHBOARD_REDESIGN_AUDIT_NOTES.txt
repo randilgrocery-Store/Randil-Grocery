@@ -1,0 +1,783 @@
+================================================================================
+  RANDIL GROCERY POS  -  ADMIN DASHBOARD REDESIGN
+  STEP 1 : AUDIT REPORT + DECISION SHEET
+================================================================================
+  App        : Randil Grocery POS (Flutter Desktop, Windows .exe)
+  Currency   : Rs (Sri Lankan Rupee)      Language : English
+  Brand      : Green (Keells Green 0xFF00843D)
+  Date       : 2026-10-06
+  Status     : AUDIT ONLY - NO CODE WRITTEN - AWAITING APPROVAL
+
+  NOTE TO SELF / TEAM: every number in the screenshots was test data.
+  Nothing from the screenshots has been or will be copied into code.
+  All values must come from existing providers / repositories.
+
+
+################################################################################
+  SECTION 0 : VERIFIED BASELINE  (measured on the untouched tree)
+################################################################################
+
+  flutter build windows --debug .............................. SUCCESS
+      -> Built build\windows\x64\runner\Debug\randil_grocery_pos.exe
+      (The "file_picker" lines are upstream plugin stderr warnings, harmless.
+       PowerShell's NativeCommandError wrapper caused the fake "Exited 1".)
+
+  flutter analyze ............................................ 130 issues
+
+      AREA                ERRORS   WARNINGS   INFO
+      -------------------------------------------------------
+      test/                    55          0      0
+      lib/                     70          4      1
+      lib/ REACHABLE           0          4      1   <-- the number that matters
+      -------------------------------------------------------
+
+  The 70 lib/ errors are all in 7 ORPHANED files that nothing imports
+  (dead work-in-progress modules never wired into the app):
+
+      data/database/repack_crud.dart ............... 26   imported by: nothing
+      data/services/cash_drawer_service.dart ....... 12   imported by:
+                                                       cash_drawer_coordinator
+                                                       -> which nothing imports
+      data/database/repack_production.dart .......... 12   imported by: nothing
+      providers/repack_provider.dart ................  8   imported by:
+                                                       repack_screen
+                                                       -> which nothing imports
+      providers/cash_drawer_coordinator.dart ........  7   imported by: nothing
+      providers/reload_card_provider.dart ...........  4   imported by:
+                                                       reload_card_screen
+                                                       -> which nothing imports
+      providers/item_sales_provider.dart ............  2   imported by: nothing
+
+  The 55 test/ errors test APIs that no longer exist
+  (SellType, bagCharge, enableTax, taxPercentage, discountAmount,
+   gramsPerKg, cashDrawerPin, cashDrawerEnabled, ...). Stale tests.
+
+  Only 4 non-error issues exist in the REACHABLE graph - all mine to clear:
+
+      screens/dashboard/dashboard_screen.dart:578  warning  unused_element
+                                          (_rangeExpenses - dead method)
+      screens/dashboard/dashboard_screen.dart:1621 info     unnecessary
+                                          string interpolation
+      widgets/profit_loss_panel.dart:1            warning  unused_import
+                                          dart:async
+      screens/settings/settings_screen.dart:236   warning  unused_local_var
+                                          'target'
+
+  BASELINE PROMISE: reachable graph stays at 0 errors after every step.
+                    flutter build windows must stay green after every step.
+
+
+################################################################################
+  SECTION 1 : ARCHITECTURE MAP
+################################################################################
+
+  1.1 STACK
+  -----------------------------------------------------------------------
+    State management ... provider 6.x + ChangeNotifier
+    Persistence ....... sqflite_common_ffi (local SQLite)
+                        DatabaseService = SINGLETON (factory -> _instance)
+                        lib/data/database/database_service.dart (2433 lines)
+    Routing ........... MaterialApp.routes - ONLY 2 NAMED ROUTES
+                        '/login' and '/home'   (main.dart:129-132)
+                        No onGenerateRoute. Everything else is index-based.
+    Charts ............ fl_chart 0.65
+    Fonts ............. google_fonts 6.1  (DECLARED BUT CURRENTLY UNUSED -
+                        there is not a single GoogleFonts.* call in lib/)
+    Window ............ window_manager 0.4.3
+                        opens FULLSCREEN, minimumSize 1024x700
+    Networking ........ NetworkProvider -> PosServer / PosDiscovery
+                        "Server running" chip
+
+  1.2 REGISTERED PROVIDERS  (main.dart:99-135, 18 total)
+  -----------------------------------------------------------------------
+    Theme      Auth       Category   Product    Sales      Settings
+    Reports    ProfitLoss  Customer   Supplier   Batch      RefundReturn
+    Payment    PurchaseOrder  Expense Grn       Wastage    Network
+
+    !! EXISTS ON DISK BUT NOT REGISTERED (context.watch would throw) - these
+       screens instantiate them directly instead, so they are OUT OF SCOPE:
+         repack_provider  item_sales_provider  no_barcode_provider
+         reload_provider  mobile_reload_provider  reload_card_provider
+         cash_drawer_coordinator
+
+  1.3 NAVIGATION SHELL
+  -----------------------------------------------------------------------
+    lib/presentation/screens/dashboard/home_screen.dart
+        HomeScreen / _HomeScreenState
+
+        Consumer<AuthProvider> -> role split
+        ADMIN nav   (_adminNavLabels lines 50-80)  13 entries, index 0..12
+            0 Dashboard        5 Purchase Orders  9 Expenses
+            1 POS              6 Suppliers        10 Wastage
+            2 Inventory        7 Refunds          11 Reports
+            3 GRN              8 Customers        12 Settings
+            4 Batches
+        CASHIER nav (_cashierNavLabels lines 83-97)  5 entries
+            0 Dashboard  1 POS  2 GRN  3 Refunds  4 Profile
+
+        Screens are an INDEXED LIST (_getAdminScreens() lines 185-205).
+        _handleNavigation(i) just does setState. No real routes exist.
+        Body wrapped in SlideTransition + FadeTransition, 400ms, ONE
+        AnimationController.
+        bottomNavigationBar: BottomNavigationBar  (lines 419-442)
+        AppBar (lines 273-396) = logo, animated title, NetworkProvider chip,
+        user chip, and a PROMINENT TextButton.icon Logout.
+
+  1.4 DEAD / LEGACY CODE FOUND
+  -----------------------------------------------------------------------
+    lib/presentation/widgets/navigation.dart
+        Navbar + Sidebar classes ....... 100% UNUSED (zero references)
+    lib/core/utils/ui_scaler.dart
+        UiScaler ....................... UNUSED (zero references)
+    dashboard_screen.dart:578
+        _rangeExpenses() ............... DEAD (defined, never called)
+    custom_widgets.dart
+        StatCard / ProductCard / DashboardHeroPanel .. partially used elsewhere
+
+  1.5 CURRENCY FACTS
+  -----------------------------------------------------------------------
+    ShopSettings.currency         = 'LKR'
+    ShopSettings.currencySymbol   = 'Rs.'
+    Existing formatters INCONSISTENT:
+        custom_widgets.dart:445    'Rs. ${price.toStringAsFixed(2)}'   <- "Rs."
+        money_calculator.dart:92    'Rs. ${amount.toStringAsFixed(2)}'  <- "Rs."
+        profit_loss_panel.dart:554 'Rs ${NumberFormat('#,##0.00')}'    <- "Rs"
+        dashboard (many)            'Rs ${x.toStringAsFixed(0)}'       <- "Rs"
+    NONE of them have thousand separators except profit_loss_panel.
+    KPI card ICON uses Icons.currency_rupee = the RUPEE glyph  <-- WRONG
+
+
+################################################################################
+  SECTION 2 : DASHBOARD WIDGET -> DATA SOURCE MAP
+################################################################################
+
+  File: lib/presentation/screens/dashboard/dashboard_screen.dart (1727 lines)
+  DashboardScreen inputs: 5 nullable callbacks, wired by home_screen.dart:186-192
+      onNavigateToPos / Refunds / Inventory / Reports / Settings
+      -> each is just _handleNavigation(<index>)
+
+  #   WIDGET                     LINES      DATA SOURCE (EXACT)         RANGE?
+  --------------------------------------------------------------------------------
+  1   Hero greeting banner       277-382   SettingsProvider.settings
+                                              .shopName; DateTime.now();
+                                              ReportsProvider.dailyReport   NO
+  2   Range toggle               507-563   local _selectedRange state     -
+  3   "Today" hero stat block    409-487   dailyReport['totalRevenue',
+                                              'totalTransactions']          NO
+  4   "Live now HH:MM:SS" pill   395-407   local _lastRefreshed (static)  NO
+  5   Business Snapshot strip    585-626   dailyReport (4 stats) +
+                                              ExpenseProvider.expenses +
+                                              SupplierProvider
+                                                .totalOutstanding          NO
+  6   8 KPI cards                673-775   ReportsProvider
+                                              .getSalesByDateRange()
+                                              (_rangeSalesFuture +
+                                               _prevRangeSalesFuture) +
+                                              ProductProvider.allProducts +
+                                              ProfitLossProvider.data      YES
+  7   Profit & Loss panel        933-939   ProfitLossPanel ->
+                                              ProfitLossProvider.data ->
+                                              DatabaseService
+                                               .getBusinessProfitLoss()    YES
+  8   Revenue Trend line chart   953-1108  _rangeSalesFuture             YES
+  9   Top-Selling bar chart      1110-1238  _rangeSalesFuture
+                                              (grouped by item.productName) YES
+  10  Quick Actions (6 tiles)    1276-1383  no data - callbacks only       -
+  11  Inventory Health donut     1385-1495  ProductProvider
+                                              .getLowStockCount() +
+                                              .getOutOfStockCount()       n/a
+  12  "Low Stock Alert" card /
+      "All Items in Stock"       1497-1649  ProductProvider
+                                              .getLowStockProducts() ONLY n/a
+  13  Cashier Leaderboard        1651-1763  _rangeSalesFuture grouped by
+                                              sale.cashierName             YES
+
+  ==> SINGLE SOURCE OF STOCK TRUTH TODAY = ProductProvider, 4 methods:
+      getLowStockCount()  getOutOfStockCount()
+      getLowStockProducts()  getOutOfStockProducts()
+
+
+################################################################################
+  SECTION 3 : BUG FINDINGS
+################################################################################
+
+  ----------------------------------------------------------------------------
+  BUG 1  [RED]  "All Items in Stock" contradicts "5 Stock Warnings"
+               ROOT CAUSE CONFIRMED - NOT A DATA ERROR
+  ----------------------------------------------------------------------------
+    WHERE   product_provider.dart:121-130
+
+      int getLowStockCount()      => _products.where((p) => p.quantity >  0
+                                                     && p.quantity < 10).length;
+      int getOutOfStockCount()    => _products.where((p) => p.quantity <= 0).length;
+      List getLowStockProducts()  => _products.where((p) => p.quantity >  0
+                                                     && p.quantity < 10).toList();
+      List getOutOfStockProducts()=> _products.where((p) => p.quantity <= 0).toList();
+
+    WHY IT BREAKS
+      _buildLowStockAlert() (line 1500) reads ONLY getLowStockProducts(),
+      which by its own definition EXCLUDES out-of-stock items (quantity > 0).
+      So the three dashboard widgets query three DIFFERENT slices:
+
+        Widget                      Reads                     Result
+        ----------------------------------------------------------------------
+        KPI "Stock Warnings" (743)  low + out                 5   correct
+        Inventory donut  (1389-92)  both counts, normal =      5   correct
+                                   total - low - out              out of
+                                                                   stock
+        Low Stock Alert   (1500)   getLowStockProducts() ONLY  []  WRONG ->
+                                                                     "All Items
+                                                                      in Stock"
+
+      When EVERY problem item is out of stock, the list is empty and the card
+      prints the reassuring "All Items in Stock" state.
+
+    PROPOSED FIX (presentation only, ZERO logic change, KEEP ONE SOURCE):
+      Build the reorder list as
+          getLowStockProducts() + getOutOfStockProducts()
+      and gate the EMPTY state on that COMBINED list, never on
+      getLowStockProducts() alone. ProductProvider stays the only place stock
+      is classified; the dashboard stops re-deriving status.
+
+    !! DEEPER INCONSISTENCY - FOUR DIFFERENT "LOW STOCK" RULES EXIST TODAY !!
+
+      RULE A  product_provider.dart:121-130   dashboard      hardcoded < 10
+      RULE B  inventory_screen.dart:353       inventory      qty < (reorderLevel
+                                                                  ?? 10)
+      RULE C  purchase_order_screen.dart:45,203  POs        reorderLevel ?? 10
+      RULE D  product.dart:75-76              MODEL         needsReorder:
+            needsReorder  = reorderLevel != null && qty <= reorderLevel
+            isLowStock    = reorderLevel != null && qty < reorderLevel * 2
+            *** RULE D IS NEVER CALLED ANYWHERE - DEAD CODE ***
+
+      So the Dashboard says "Low" by rule A, but you reorder from a screen
+      that uses rule B/C. Fixing only the empty state keeps the numeric
+      disagreement.
+
+      RECOMMENDATION: unify on rule B, because that is what the user already
+      sees in Inventory and Purchase Orders:
+          quantity <= 0                    -> Out of stock
+          else qty < (reorderLevel ?? 10)  -> Low
+          else                             -> Normal
+
+      OPTIONS: (a) presentation-only unification with existing getters (safe,
+               but rule A vs rule B still differ numerically)
+              (b) add ONE read-only stockStatusOf(Product) /
+                  getReorderCandidates() to ProductProvider using rule B
+                  -> TOUCHES A STATE-MANAGEMENT CLASS, needs explicit OK
+              (c) leave rule A, fix only the empty state
+
+  ----------------------------------------------------------------------------
+  BUG 2  [ORANGE]  TIME SCOPE - "Today's..." widgets IGNORE the Range toggle
+  ----------------------------------------------------------------------------
+    TWO unrelated time scopes coexist on one screen:
+
+      SOURCE                                     SCOPE       USED BY
+      -----------------------------------------------------------------------
+      ReportsProvider.dailyReport                ALWAYS      hero block (363)
+        (getDailySalesReport(now))               TODAY       Business
+                                                             Snapshot (588)
+      _rangeSalesFuture                          FOLLOWS     KPI row, charts,
+        (getSalesByDateRange(start,end))         TOGGLE      leaderboard
+      ProfitLossProvider                         FOLLOWS     P&L panel
+        (refresh(start,end))                     TOGGLE
+
+    _refreshDashboard() line 147 calls generateDailyReport(now) with NO range
+    argument - the provider has no ranged daily report.
+    _todayExpenses() line 567 hardcodes a same-day filter.
+    _rangeExpenses() line 578 is the ranged version - WRITTEN THEN ABANDONED.
+
+    RESULT: with Range = 7D the header reads "Rs 3,240 (Today)" while the KPI
+    row reads "Rs 14,770 (7D)". Two different "Total Sales" on one screen.
+
+    PROPOSED SOLUTION (no business logic touched):
+      1. ONE DashboardRangeController (ChangeNotifier, NEW file,
+         presentation only) owned by the shell. Exposes DashboardRange +
+         customStart/customEnd + resolved start/end. Top-bar selector drives
+         it; dashboard consumes it. Existing DashboardRange enum values
+         PRESERVED UNCHANGED.
+      2. EVERY widget becomes range-driven. The 3 "Today" boxes are DELETED as
+         separate widgets; their figures become a compact SECONDARY LINE inside
+         the KPI cards (Total Sales card shows "Today: Rs 3,240").
+      3. ProfitLossProvider is already range-aware. Call it for the PREVIOUS
+         period too so every KPI gets a true "vs previous period" trend.
+         (Today only Total Sales has a delta; the other 7 cards have none, and
+          _deltaPercent returns null whenever previous <= 0 -> silently no
+          trend.)
+      4. "Today" figures for the chip come from the SAME sales list already
+         fetched for the range, filtered client-side to saleDate == today.
+         No second query, no new provider API.
+      5. Add "Custom" as a 4th enum value WITHOUT touching existing cases.
+
+    TIMEZONE NOTE: saleDate is stored as a LOCAL-TIME ISO-8601 string and
+    compared lexicographically (saleDate >= ? AND saleDate <= ?). Correct as
+    long as all writes use local DateTime.now(). _rangeEnd() returns 23:59:59
+    (line 173) - safe. BUT the client must not run in a different timezone
+    than the server, which matters for the multi-terminal setup.
+
+  ----------------------------------------------------------------------------
+  BUG 3  [YELLOW]  THE "Live now" CLOCK DOES NOT TICK  (opposite of assumed)
+  ----------------------------------------------------------------------------
+    VERIFIED: there is NO Timer, Timer.periodic, StreamBuilder or
+    AnimatedBuilder anywhere in dashboard_screen.dart.
+
+      // dashboard_screen.dart:403
+      'Live now • ${_lastRefreshed...split('T')[1].split('.').first}'
+
+    _lastRefreshed (line 49) is assigned ONLY inside _refreshDashboard()
+    (line 160) - on manual Refresh, on tab-0 entry, or pull-to-refresh.
+
+    So the pill is a FROZEN SNAPSHOT LABELLED "Live now". It is not a
+    performance problem - it is a CREDIBILITY problem. A client watching it
+    will think the dashboard is live when it is not.
+
+    PROPOSED FIX: extract a small self-contained LiveClock widget
+    (StatefulWidget, its OWN Timer.periodic(1s), setState on ITSELF only) that
+    also shows "updated HH:MM:SS" for the last data refresh. The Timer lives
+    inside that widget's State, so only its ~2 lines of text repaint per
+    second; the dashboard tree is untouched. Optionally drive a silent data
+    refresh from the same tick on a longer interval.
+
+  ----------------------------------------------------------------------------
+  BUG 4  [YELLOW]  CURRENCY SYMBOL INCONSISTENT
+  ----------------------------------------------------------------------------
+    Place                      Symbol   Line
+    ---------------------------------------------------------------
+    KPI card icon              RUPEE    dashboard_screen.dart:689
+    Most money text            Rs       various
+    custom_widgets.dart:445    Rs.      (with a dot)
+    money_calculator.dart:92   Rs.      (with a dot)
+    profit_loss_panel.dart:554 Rs       (has separators)
+    Chart axes                 Rs       1043, 1229
+    ShopSettings               Rs.      shop_settings.dart:8-9
+
+    The RUPEE glyph is factually wrong for Sri Lankan Rupees and is the most
+    obvious thing a client would notice.
+
+    PROPOSED FIX: drop Icons.currency_rupee entirely. All money renders with a
+    single formatter:
+        full ..... Rs 14,770.00   (thousand separators, 2 decimals)
+        compact .. Rs 14.8K       (for tight spaces)
+    currencySymbol from ShopSettings stays the source of truth for the prefix.
+    NO hardcoded numbers anywhere.
+
+  ----------------------------------------------------------------------------
+  BUG 5  [ORANGE]  PROFIT & LOSS CARD PRESENTATION PROBLEMS
+  ----------------------------------------------------------------------------
+    profit_loss_panel.dart (535 lines) mixes THREE different statements into
+    ONE list:
+
+      Money In             Sales revenue / Discounts given / Net sales taken /
+                           Cash-Card
+      Cost of goods sold   Cost of items sold / Gross profit
+      Running costs        Wastage loss / Refunds paid / Shop expenses
+        -- NET PROFIT --
+      Money in & out       Stock received from suppliers / Paid to suppliers /
+      of the till          Still owed to suppliers /
+                           STOCK ON HAND (cost value)   <-- AN ASSET!
+      How each part...     6 module tiles
+
+    CONFIRMED PROBLEMS
+
+    (i) "Stock on Hand (cost value)" is a BALANCE-SHEET ASSET, not a P&L line.
+        It sits inside a statement whose bottom line is NET PROFIT, so a
+        reader naturally subtracts it. It must move out.
+
+    (ii) "Profit" and "Net Profit" appear as separate numbers. They are EQUAL
+        whenever wastage + refunds + expenses = 0, which looks like a bug.
+        The duplicate is KPI card "Gross Profit" (line 713) vs the panel's
+        "NET PROFIT".
+
+    (iii) netProfit FORMULA IS INTERNALLY INCONSISTENT
+          CONFIRMED at database_service.dart:1966-1970
+
+            final totalLoss = cogs + wastageLoss + refundLoss + expenseTotal;
+            final netProfit = revenue - totalLoss;
+
+          * discounts is COLLECTED (1836) and DISPLAYED (panel 67) but is
+            NEVER SUBTRACTED. revenue is sale.totalAmount, i.e. ALREADY AFTER
+            the bill's discount. So the panel prints a "Discounts given" line
+            implying it reduces the result while the math already removed it.
+            DOUBLE-COUNTING IN THE READER'S HEAD; the number is right, the
+            presentation is wrong.
+          * grossProfit = revenue - cogs uses the same revenue, so the panel's
+            "Net sales taken = revenue - discounts" line is decorative - it
+            feeds nothing.
+          * refundLoss subtracts the refund amount but the refunded goods' COGS
+            is NEVER credited back. A processed refund cuts profit by the full
+            SELLING price of goods that went back on the shelf. Over time this
+            systematically UNDERSTATES profit.
+          * splitSales is declared (1831), returned (1982), and ALWAYS 0.
+            Dead key.
+          * The P&L KPI uses pl.d('netProfit') only if pl.data != null, else
+            falls back to rangeStats.profit (line 684) - a SILENT FALLBACK to
+            a DIFFERENT formula (revenue - currentBuyingPrice x qty, ignoring
+            wastage/refunds/expenses). That is a THIRD "net profit" definition
+            on the same screen.
+
+    PROPOSED PRESENTATION SPLIT (calculations UNCHANGED)
+      * P&L SUMMARY CARD (admin, 1/3 width):
+          Sales Profit -> Wastage Loss -> Refund Loss -> Expenses -> NET PROFIT
+        Net Profit clearly highlighted. Each line with "vs previous period".
+        "Stock on Hand" REMOVED from here.
+      * INVENTORY PANEL (Row 3) gains:
+          "Inventory Value (cost) Rs 14,770.00 - 312 items"
+        sourced from the SAME pl.d('stockValue') / pl.d('stockItems') keys.
+        No new query.
+      * "Gross Profit" removed from the KPI row (net profit covers it);
+        margin % kept. No card shows two profit numbers with different
+        formulas any more.
+      * Panel labels rewritten so discounts read as "already deducted at
+        billing" rather than implying a subtraction.
+      * profit_loss_panel.dart STAYS AS-IS, still used as the admin-only full
+        P&L detail behind a link.
+
+    >>> Q4: (iii) discounts + refund-COGS are BUSINESS LOGIC. Labels only this
+        pass, or file a separate ticket? Will not be changed silently.
+
+
+################################################################################
+  SECTION 4 : MISSING DATA SOURCES
+################################################################################
+
+  Requested panel                     Verdict        Reason
+  --------------------------------------------------------------------------------
+  Customer credit / debts             NOT SUPPORTED  Customer model has
+                                                totalSpent, totalTransactions.
+                                                NO balance, NO credit limit,
+                                                NO ledger table. Would need a
+                                                schema change.
+
+  Pending GRNs                        NOT SUPPORTED  GoodsReceivedNote has NO
+                                                status field. A GRN records
+                                                goods ALREADY received. There
+                                                is no expected/pending state.
+                                                -> render as "Recent GRNs" or drop
+
+  Global expiring-batches list        PARTIAL        BatchProvider.batches only
+                                                holds batches for a SELECTED
+                                                product. BUT getExpiringBatches()
+                                                (batch_provider.dart:89) is a
+                                                public Future method - usable
+                                                directly from the UI with a
+                                                FutureBuilder. DOABLE with no
+                                                provider change.
+
+  Sparkline per KPI                   PARTIAL        Needs a per-day series.
+                                                getDailySalesReport is
+                                                single-day. BUT the revenue
+                                                series is already computable
+                                                from the _rangeSalesFuture list
+                                                already fetched (see
+                                                _buildRevenueSeriesForRange
+                                                line 1240). Plan: sparklines on
+                                                Total Sales + Net Profit only;
+                                                other KPIs get the delta chip.
+
+  Low-stock badge on sidebar          AVAILABLE      getLowStockCount() +
+                                                getOutOfStockCount()
+
+  Pending POs                         AVAILABLE      PurchaseOrderProvider
+                                                .pendingOrders
+                                                !! loadOrders() is NEVER CALLED
+                                                by the dashboard - it would show
+                                                empty. Add the call from the
+                                                new shell's refresh.
+
+  We Owe Suppliers                   AVAILABLE      SupplierProvider
+                                                .totalOutstanding
+                                                (GRN total - payments)
+
+  Recent refunds                      AVAILABLE      RefundReturnProvider.refunds
+                                                (status, totalRefundAmount,
+                                                requestDate, invoiceNumber)
+
+  Recent wastage                      AVAILABLE      WastageProvider.wastages
+
+  Recent bills table                  6 OF 7         Sale has saleDate,
+                                                invoiceLabel, cashierName, items,
+                                                totalAmount, paymentMethod.
+                                                !! STATUS DOES NOT EXIST -
+                                                bills have no void/refund/hold
+                                                state. OMIT the column or show
+                                                "—" everywhere (looks broken).
+                                                RECOMMENDATION: drop it.
+
+  Chart previous-period comparison    AVAILABLE      _prevRangeSalesFuture
+                                                already exists (line 47)
+
+  Revenue Trend comparison line       AVAILABLE      same as above
+
+
+################################################################################
+  SECTION 5 : SIDE-SHELL RISK  (Rule 8 - other screens at the new width)
+################################################################################
+
+  THIS IS THE BIGGEST TECHNICAL RISK IN THE WHOLE PASS.
+
+  GOOD NEWS
+    ResponsiveSize (core/constants/responsive.dart:10-11) reads
+        MediaQuery.of(context).size.width      <- the WINDOW width
+    NOT the content width. A sidebar does NOT change MediaQuery, so
+    isTablet / isDesktop / productGridColumns keep their CURRENT values.
+    ==> NO screen changes its layout mode. Verified in the import graph.
+
+  THE RISK
+    The real available width shrinks. pos_screen.dart:1021-1028 builds its
+    grid with crossAxisCount: responsive.productGridColumns (5 on desktop)
+    and childAspectRatio: 0.85 - NO fixed widths, so cards just get NARROWER
+    and SHORTER. Card content (image + name + price + add button) is the
+    overflow candidate.
+
+    main.dart:56-57 currently allows a 1024x700 window with no sidebar.
+    With a 232px sidebar that leaves 792px of content on a 1024 screen.
+
+  THEME TRAP
+    pos_screen.dart:1038 reads Theme.of(context).appBarTheme.backgroundColor
+    for its category strip. Currently UNSET, so it falls back to the M3
+    default.
+    ==> WILL NOT SET appBarTheme in the new ThemeData, or the POS header
+        colour changes silently.
+
+  MITIGATIONS PROPOSED
+    - Collapsible sidebar (icon rail ~64px when collapsed)
+    - Default collapsed below ~1500px width
+    - Bump WindowOptions.minimumSize 1024x700 -> 1280x760  (needs Q5 OK)
+    - Every other screen stays byte-identical, just re-parented.
+
+
+################################################################################
+  SECTION 6 : NEW DEPENDENCIES  (proposed - none added yet)
+################################################################################
+
+  PACKAGE           VERDICT   JUSTIFICATION
+  --------------------------------------------------------------------------------
+  shimmer 3.x       OPTIONAL  You asked for skeleton/shimmer loading. An
+                              EQUIVALENT PURE-FLUTTER shimmer can be built in
+                              ~60 lines (AnimationController + gradient
+                              sweep) with ZERO new deps - keeps the .exe
+                              smaller and avoids re-vendoring for the
+                              installer.
+                              RECOMMENDATION: NO NEW PACKAGE.
+
+  fl_chart 0.65     PRESENT   Reused. belowBarData, monotone interpolation,
+                              tooltip comparators all available.
+                              NO UPGRADE (0.65 is old; upgrading is a risk).
+
+  google_fonts 6.1  PRESENT   For Inter. BUT it fetches from
+                              fonts.googleapis.com AT RUNTIME by default and
+                              silently falls back to Roboto OFFLINE - your
+                              terminals are LAN/offline.
+                              RECOMMENDATION: bundle Inter as an ASSET via
+                              GoogleFonts.config.allowRuntimeFetching = false,
+                              or use the system font stack.  (see Q6)
+
+  window_manager     PRESENT   Reused for min-size + fullscreen.
+  intl              PRESENT   Reused for NumberFormat('#,##0.00'), already
+                              used by profit_loss_panel.dart:552.
+
+  NEW PACKAGES ...... NONE PROPOSED
+                      Everything requested is buildable on fl_chart + intl +
+                      google_fonts, all already in pubspec.yaml.
+
+
+################################################################################
+  SECTION 7 : PROPOSED PLAN  (7 compile-safe steps)
+################################################################################
+
+  Every step ends with a clean reachable-graph analyze AND a running .exe.
+
+  STEP 1  Design system
+          ThemeExtension + tokens (light + dark), type/spacing/radii/shadow
+          scales, AppMoney formatter (Rs 14,770.00 / Rs 14.8K)
+          NEW  : lib/presentation/theme/app_tokens.dart
+                 lib/presentation/theme/app_theme.dart
+                 lib/presentation/theme/app_money.dart
+          EDIT : (none)
+
+  STEP 2  Reusable components
+          AppCard, KpiCard, SectionHeader, StatusBadge, AppDataTable,
+          EmptyState, ErrorState, SkeletonLoader, ConfirmDialog, Toast
+          (Toast delegates to the EXISTING showPosToast / showTopSnackBar)
+          NEW  : lib/presentation/widgets/app_*.dart  (10 files)
+          EDIT : custom_widgets.dart ONLY to delegate old names -> new ones
+                 (no signature change)
+
+  STEP 3  Global range + isolated clock
+          NEW  : lib/presentation/providers/dashboard_range_controller.dart
+                 lib/presentation/widgets/live_clock.dart
+          EDIT : (none)
+
+  STEP 4  Shell
+          Collapsible grouped SIDEBAR + slim TOP BAR (breadcrumb, Ctrl+K
+          search, global range, server chip, notifications, theme toggle,
+          user menu with a QUIET logout). Hero banner REMOVED.
+          NEW  : lib/presentation/widgets/app_sidebar.dart
+                 lib/presentation/widgets/app_top_bar.dart
+          EDIT : home_screen.dart  (SHELL ONLY - DashboardScreen, PosScreen
+                 and every other screen stay untouched)
+
+  STEP 5a KPI row (6 cards, no wrapping)
+          Total Sales, Net Profit, Bills, Average Bill, Items Sold,
+          Profit Margin %. Merges the "Today" strip + hero "Today" box.
+          Trend vs previous period.
+          NEW  : .../dashboard/widgets/dashboard_kpi_row.dart
+          EDIT : dashboard_screen.dart
+
+  STEP 5b Revenue Trend (monotone, rounded Y ticks, "30 Sep" labels,
+          tooltip, previous-period comparison) + P&L summary
+          (Inventory Value moved out)
+          NEW  : dashboard_revenue_trend.dart, dashboard_pnl_summary.dart
+          EDIT : dashboard_screen.dart
+
+  STEP 5c Row 3: Top-Selling HORIZONTAL ranked bars with FULL names +
+          tooltip + quantity + revenue | Inventory Health (single stock
+          source + reorder list + Reorder button) | Alerts & Actions
+          (expiring batches, low stock, pending POs, We Owe Suppliers)
+          NEW  : 3 widget files
+          EDIT : dashboard_screen.dart
+
+  STEP 5d Row 4: Recent Bills table + Cashier Leaderboard (1-user friendly) +
+          compact Quick-Action BAR. Wire every card / chart / table row to
+          the existing _handleNavigation indices.
+          NEW  : dashboard_recent_bills.dart, dashboard_quick_actions.dart
+          EDIT : dashboard_screen.dart
+
+  STEP 6  Polish
+          Hover states, animated number counters, smooth chart transitions,
+          page/sidebar transitions (150-300ms, subtle),
+          F-keys + Ctrl+K shortcuts WITH TOOLTIPS,
+          const constructors, per-card provider isolation (each provider
+          rebuilds only its own card), cached chart data,
+          focus states, contrast, 44px min click targets for touch terminals.
+
+  STEP 7  Verify
+          Reachable-graph analyze clean, build green, then manually run all
+          13 admin screens inside the new shell at
+          1920x1080 / 1600x900 / 1366x768 / 1280x760
+          plus the cashier role (5 screens).
+
+  GUARANTEE: no model, entity, repository, service, DB schema, API contract
+             or business logic changes. No file/renames. No signature changes.
+             profit_loss_panel.dart stays as-is (still used behind a link).
+
+
+################################################################################
+  SECTION 8 : TARGET DASHBOARD LAYOUT  (12-column responsive grid)
+################################################################################
+
+  ROW 1  KPI ROW - 6 equal cards, NO WRAPPING
+         Total Sales | Net Profit | Bills | Average Bill | Items Sold |
+         Profit Margin %
+         each: trend vs previous period
+         "Today" figures shown as a small SECONDARY LINE (not a bordered box)
+
+  ROW 2  LEFT  (2/3) Revenue Trend chart
+               area/line, MONOTONE or straight interpolation so it NEVER
+               dips below zero, rounded Y-axis ticks, "30 Sep" labels,
+               tooltips, optional previous-period comparison line
+         RIGHT (1/3) Profit & Loss summary
+               Sales Profit, Wastage Loss, Refund Loss, Expenses, NET PROFIT
+               Net Profit clearly highlighted.
+               Stock on Hand MOVES to the Inventory panel as "Inventory Value"
+
+  ROW 3  LEFT    Top-Selling Items - HORIZONTAL ranked bar list, FULL product
+                 names (ellipsis + tooltip), quantity and revenue.
+                 No identical truncated labels.
+         MIDDLE  Inventory Health - donut with legend and counts
+                 (Normal / Low / Out of stock) from a SINGLE stock-status
+                 source of truth, plus an actionable reorder list with a
+                 "Reorder" button.
+         RIGHT   Alerts & Actions - expiring batches (Batches module), low
+                 stock, pending POs, "We Owe Suppliers". Every row navigates
+                 to the relevant screen.
+
+  ROW 4  Recent Bills table (time, bill no., cashier, items, total, payment
+         method; NO status column - see Section 4)
+         + Cashier Leaderboard (must look fine with a single user)
+
+  QUICK ACTIONS  compact single row of buttons (New Sale, Refund, New GRN,
+         Add Expense, Reorder, Reports) using existing routes, all one style,
+         no random colours.
+
+  FIT  the whole dashboard on ONE 1920x1080 screen with no scrolling;
+  degrade gracefully by scrolling on smaller windows; min width ~1100px;
+  no overflow errors; no orphan cards wrapping to a lone row.
+
+
+################################################################################
+  SECTION 9 : DECISIONS REQUIRED  (8 questions - fill in and return)
+################################################################################
+
+  Q1  STOCK-STATUS RULE (BUG 1)
+      a) presentation-only fix, dashboard stays on hardcoded < 10
+      b) RECOMMENDED - align dashboard to qty < (reorderLevel ?? 10).
+         Requires adding ONE read-only getter to ProductProvider (touches a
+         state-management class, so it needs your explicit OK).
+      c) leave everything, only fix the empty state
+      -> ANSWER: ____
+
+  Q2  TREND vs PREVIOUS PERIOD
+      May I call ProfitLossProvider TWICE (current + previous period) so the
+      P&L lines get a real trend %? New call site only, no logic change.
+      -> ANSWER: ____
+
+  Q3  AUTO-REFRESH CADENCE
+      a) clock ticks, data stays manual-refresh
+      b) RECOMMENDED - clock ticks 1s + silent data refresh every 60s
+      c) every 30s
+      -> ANSWER: ____
+
+  Q4  BUG 5 BUSINESS LOGIC
+      discounts are already excluded from revenue but displayed as if
+      subtracted; refunded goods' COGS is never credited back.
+      Fix LABELS ONLY this pass, or file a separate business-logic ticket?
+      -> ANSWER: ____
+
+  Q5  WINDOW MINIMUM SIZE
+      Raise WindowOptions.minimumSize from 1024x700 to 1280x760 so the sidebar
+      never squeezes the POS grid? (presentation-level, in main.dart)
+      -> ANSWER: ____
+
+  Q6  INTER FONT
+      a) RECOMMENDED - bundle as an asset (offline-safe, slightly bigger .exe)
+      b) system font stack / runtime-fetch-with-fallback (silently becomes
+         Roboto on an offline terminal)
+      -> ANSWER: ____
+
+  Q7  RECENT BILLS "STATUS" COLUMN
+      Sale has no status field.
+      a) RECOMMENDED - drop the column
+      b) show payment-method badges only
+      c) show "—" for every row
+      -> ANSWER: ____
+
+  Q8  THE 130 PRE-EXISTING ANALYZER ISSUES
+      a) RECOMMENDED - leave them; guarantee only that the reachable graph
+         stays at 0 errors; report the 130 as pre-existing
+      b) add analysis_options.yaml exclude: for test/** and the 4 orphan
+         files (one config file, zero code change, but hides the orphans)
+      c) delete the orphans and stale tests
+         (NOT RECOMMENDED - deletes WIP outside the audit's remit)
+      -> ANSWER: ____
+
+
+################################################################################
+  SECTION 10 : DELIVERABLES STATUS
+################################################################################
+
+  [x] 1. Audit report, bug findings, plan          DELIVERED (this file)
+  [ ]    -> awaiting approval on the 8 questions above
+  [ ] 2. Design-system files                      blocked on approval
+  [ ] 3. Shell + dashboard redesign, small steps  blocked on approval
+  [ ] 4. "Missing data sources" list             DONE - Section 4
+         "Things I must test" checklist          drafted, delivered at the end
+  [ ] 5. Confirmation that no business logic,
+        schema, or model was changed              will be restated per step
+
+  NO CODE HAS BEEN WRITTEN.
+
+
+================================================================================
+  END OF STEP 1 AUDIT
+================================================================================

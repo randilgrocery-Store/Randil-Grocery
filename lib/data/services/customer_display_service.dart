@@ -26,6 +26,9 @@ class CustomerDisplayService {
 
   bool get isConnected => _window != null && !_hidden;
 
+  /// Reason the customer window failed to open/show, for user-facing errors.
+  String? lastError;
+
   /// Starts the service. Should be called exactly once after login.
   Future<void> start({required SalesProvider salesProvider}) async {
     if (_salesProvider == null) {
@@ -79,6 +82,7 @@ class CustomerDisplayService {
         );
       } catch (e) {
         debugPrint('CustomerDisplayService: failed to open window: $e');
+        lastError = e.toString();
         _window = null;
         return;
       }
@@ -102,9 +106,11 @@ class CustomerDisplayService {
       await _ensureMainFullScreen();
     } catch (e) {
       debugPrint('CustomerDisplayService: failed to show window: $e');
+      lastError = e.toString();
       _window = null;
       return;
     }
+    lastError = null;
 
     // The sub-window registers its channel handler asynchronously; retry the
     // initial push for a short while.

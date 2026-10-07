@@ -22,7 +22,7 @@ class Wastage {
         id: map['id'] as String,
         productId: map['productId'] as String,
         productName: map['productName'] as String,
-        quantity: map['quantity'] as int,
+        quantity: (map['quantity'] as num).toDouble(),
         reason: map['reason'] as String,
         lossValue: (map['lossValue'] as num).toDouble(),
         batchId: map['batchId'] as String? ?? '',
@@ -37,7 +37,7 @@ class Wastage {
   final String id;
   final String productId;
   final String productName;
-  final int quantity;
+  final double quantity;
   final String reason;
   final double lossValue;
   final String batchId;

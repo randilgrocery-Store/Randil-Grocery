@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
@@ -22,6 +23,32 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
   double _subtotal = 0.0;
   double _discount = 0.0;
   String _status = 'Welcome to Randil Grocery!';
+
+  // Idle promo slideshow (only while the cart is empty)
+  Timer? _promoTimer;
+  int _promoIndex = 0;
+  static const _promos = [
+    (
+      icon: Icons.eco,
+      title: 'Fresh vegetables, every morning',
+      sub: 'Straight from the market to your basket',
+    ),
+    (
+      icon: Icons.rice_bowl,
+      title: 'Rice, dhal & grains by the kilo',
+      sub: 'Weighed right in front of you — fair price per kg',
+    ),
+    (
+      icon: Icons.local_offer,
+      title: 'Best prices in town',
+      sub: 'Daily deals on your everyday essentials',
+    ),
+    (
+      icon: Icons.favorite,
+      title: 'Thank you for shopping with us',
+      sub: 'Randil Grocery — good things, fresh daily',
+    ),
+  ];
 
   @override
   void initState() {
@@ -56,6 +83,19 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
     // Fill the secondary display (falls back to the primary when no second
     // screen is attached) once the first frame has been rendered.
     WidgetsBinding.instance.addPostFrameCallback((_) => _configureWindow());
+
+    // Rotate the idle promo cards every 6 seconds.
+    _promoTimer = Timer.periodic(const Duration(seconds: 6), (_) {
+      if (_cartItems.isEmpty && mounted) {
+        setState(() => _promoIndex = (_promoIndex + 1) % _promos.length);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _promoTimer?.cancel();
+    super.dispose();
   }
 
   /// Finds this window's native handle. The desktop_multi_window plugin
@@ -280,6 +320,7 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
   }
 
   Widget _buildWelcomeView() {
+    final promo = _promos[_promoIndex];
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -321,6 +362,28 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
               color: Colors.grey[500],
             ),
           ),
+          const SizedBox(height: 36),
+          // Rotating promo card — crossfades every few seconds while idle.
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 700),
+            transitionBuilder: (child, anim) => FadeTransition(
+              opacity: anim,
+              child: SlideTransition(
+                position: Tween<Offset>(
+                  begin: const Offset(0, 0.25),
+                  end: Offset.zero,
+                ).animate(CurvedAnimation(
+                    parent: anim, curve: Curves.easeOutCubic)),
+                child: child,
+              ),
+            ),
+            child: _PromoCard(
+              key: ValueKey(_promoIndex),
+              icon: promo.icon,
+              title: promo.title,
+              sub: promo.sub,
+            ),
+          ),
         ],
       ),
     );
@@ -331,7 +394,9 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
       itemCount: _cartItems.length,
       itemBuilder: (context, index) {
         final item = _cartItems[index];
-        return Container(
+        // Newest item slides in; existing rows stay put.
+        final isNew = index == _cartItems.length - 1;
+        final card = Container(
           margin: const EdgeInsets.only(bottom: 16),
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
@@ -359,7 +424,7 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
                       ),
                     ),
                     Text(
-                      'Qty: ${item['quantity']} x Rs. ${item['price'].toStringAsFixed(2)}',
+                      'Qty: ${fmtQty(item['quantity'] as num)} x Rs. ${item['price'].toStringAsFixed(2)}',
                       style: TextStyle(
                         fontSize: 16,
                         color: Colors.grey[600],
@@ -378,6 +443,23 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
               ),
             ],
           ),
+        );
+        if (!isNew) return card;
+        return TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0, end: 1),
+          duration: const Duration(milliseconds: 400),
+          curve: Curves.easeOutCubic,
+          builder: (context, t, child) => Opacity(
+            opacity: t,
+            child: Transform.translate(
+              offset: Offset(24 * (1 - t), 0),
+              child: Transform.scale(
+                scale: 0.96 + 0.04 * t,
+                child: child,
+              ),
+            ),
+          ),
+          child: card,
         );
       },
     );
@@ -407,12 +489,17 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
           const SizedBox(height: 8),
           FittedBox(
             fit: BoxFit.scaleDown,
-            child: Text(
-              'Rs. ${_total.toStringAsFixed(2)}',
-              style: const TextStyle(
-                fontSize: 48,
-                fontWeight: FontWeight.w900,
-                color: Colors.white,
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0, end: _total),
+              duration: const Duration(milliseconds: 600),
+              curve: Curves.easeOutCubic,
+              builder: (context, v, _) => Text(
+                'Rs. ${v.toStringAsFixed(2)}',
+                style: const TextStyle(
+                  fontSize: 48,
+                  fontWeight: FontWeight.w900,
+                  color: Colors.white,
+                ),
               ),
             ),
           ),
@@ -437,6 +524,78 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
               fontSize: 18,
               color: Colors.white,
               fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One rotating idle promo slide on the customer-facing display.
+class _PromoCard extends StatelessWidget {
+  const _PromoCard({
+    required this.icon,
+    required this.title,
+    required this.sub,
+    super.key,
+  });
+
+  final IconData icon;
+  final String title;
+  final String sub;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 460),
+      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: PosAppTheme.primaryGreen.withOpacity(0.25),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: PosAppTheme.primaryGreen.withOpacity(0.10),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: PosAppTheme.primaryGreen.withOpacity(0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: PosAppTheme.primaryGreen, size: 30),
+          ),
+          const SizedBox(width: 18),
+          Flexible(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.black87,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  sub,
+                  style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+                ),
+              ],
             ),
           ),
         ],

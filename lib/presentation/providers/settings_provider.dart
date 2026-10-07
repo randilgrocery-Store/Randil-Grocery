@@ -42,14 +42,32 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   Future<void> updateTaxSettings(bool enable, double percentage) async {
-    await updateSettings(
-      _settings.copyWith(enableTax: enable, taxPercentage: percentage),
-    );
+    // Tax is not used for this shop; kept as a no-op for compatibility.
   }
 
   Future<void> updatePrinterSettings(String name, bool enable) async {
     await updateSettings(
       _settings.copyWith(printerName: name, enablePrinting: enable),
+    );
+  }
+
+  Future<void> updateCashDrawerSettings({
+    bool? enabled,
+    int? pin,
+    int? pulseOnMs,
+    int? pulseOffMs,
+    String? printerName,
+    bool? openOnCardOnly,
+  }) async {
+    await updateSettings(
+      _settings.copyWith(
+        cashDrawerEnabled: enabled,
+        cashDrawerPin: pin,
+        cashDrawerPulseOnMs: pulseOnMs,
+        cashDrawerPulseOffMs: pulseOffMs,
+        cashDrawerPrinterName: printerName,
+        cashDrawerOpenOnCardOnly: openOnCardOnly,
+      ),
     );
   }
 

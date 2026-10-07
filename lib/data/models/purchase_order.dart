@@ -14,13 +14,13 @@ class PurchaseOrderItem {
       PurchaseOrderItem(
         productId: map['productId'] as String,
         productName: map['productName'] as String,
-        quantity: map['quantity'] as int,
+        quantity: (map['quantity'] as num).toDouble(),
         costPrice: (map['costPrice'] as num).toDouble(),
       );
 
   final String productId;
   final String productName;
-  final int quantity;
+  final double quantity;
   final double costPrice;
 
   double get lineTotal => quantity * costPrice;
@@ -82,7 +82,7 @@ class PurchaseOrder {
   bool get isCancelled => status == 'Cancelled';
   double get subtotal => items.fold<double>(0, (sum, i) => sum + i.lineTotal);
   double get total => subtotal;
-  int get totalItems => items.fold<int>(0, (sum, i) => sum + i.quantity);
+  double get totalItems => items.fold<double>(0, (sum, i) => sum + i.quantity);
 
   Map<String, dynamic> toMap() => {
         'id': id,

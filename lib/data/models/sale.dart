@@ -24,7 +24,7 @@ class SaleItem {
       productId: map['productId'] as String,
       productName: map['productName'] as String,
       price: (map['price'] as num).toDouble(),
-      quantity: map['quantity'] as int,
+      quantity: (map['quantity'] as num).toDouble(),
       discount: (map['discount'] as num).toDouble(),
       costPrice: map['costPrice'] != null
           ? (map['costPrice'] as num).toDouble()
@@ -43,7 +43,7 @@ class SaleItem {
   final String productId;
   final String productName;
   final double price;
-  final int quantity;
+  final double quantity;
   final double discount;
 
   /// Weighted cost of the batch(es) this line was picked from (for accurate
@@ -87,6 +87,10 @@ class Sale {
     this.paymentMethod = 'Cash',
     DateTime? saleDate,
     this.notes = '',
+    this.customerName = '',
+    this.customerPhone = '',
+    this.cashAmount = 0,
+    this.cardAmount = 0,
   })  : id = id ?? const Uuid().v4(),
         saleDate = saleDate ?? DateTime.now();
 
@@ -106,6 +110,10 @@ class Sale {
       paymentMethod: map['paymentMethod'] as String,
       saleDate: DateTime.parse(map['saleDate'] as String),
       notes: map['notes'] as String? ?? '',
+      customerName: map['customerName'] as String? ?? '',
+      customerPhone: map['customerPhone'] as String? ?? '',
+      cashAmount: (map['cashAmount'] as num?)?.toDouble() ?? 0,
+      cardAmount: (map['cardAmount'] as num?)?.toDouble() ?? 0,
     );
   final String id;
 
@@ -123,6 +131,16 @@ class Sale {
   final String paymentMethod;
   final DateTime saleDate;
   final String notes;
+
+  /// Customer attached to the bill (empty when none was selected).
+  final String customerName;
+  final String customerPhone;
+
+  /// Tendered amounts broken down for split payments (0 when not used).
+  final double cashAmount;
+  final double cardAmount;
+
+  bool get isSplitPayment => cashAmount > 0 && cardAmount > 0;
 
   /// Invoice label to show on screen and on the printed bill.
   String get invoiceLabel => invoiceNumber.isEmpty
@@ -143,6 +161,10 @@ class Sale {
       'paymentMethod': paymentMethod,
       'saleDate': saleDate.toIso8601String(),
       'notes': notes,
+      'customerName': customerName,
+      'customerPhone': customerPhone,
+      'cashAmount': cashAmount,
+      'cardAmount': cardAmount,
     };
 
   @override

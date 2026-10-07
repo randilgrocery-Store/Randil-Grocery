@@ -15,13 +15,21 @@ import '../models/expense.dart';
 import '../models/goods_received_note.dart';
 import '../models/product.dart';
 import '../models/product_batch.dart';
+import '../models/production.dart';
 import '../models/purchase_order.dart';
+import '../models/recipe.dart';
 import '../models/refund_return.dart';
+import '../models/reload_card.dart';
 import '../models/sale.dart';
 import '../models/shop_settings.dart';
 import '../models/supplier.dart';
+import '../models/supplier_payment.dart';
 import '../models/user.dart';
 import '../models/wastage.dart';
+import '../services/backup_service.dart';
+
+part 'repack_crud.dart';
+part 'repack_production.dart';
 
 class DatabaseService {
   factory DatabaseService() => _instance;
@@ -336,11 +344,12 @@ class DatabaseService {
           categoryId TEXT NOT NULL,
           buyingPrice REAL NOT NULL,
           sellingPrice REAL NOT NULL,
-          quantity INTEGER NOT NULL,
+          quantity REAL NOT NULL,
           expiryDate TEXT,
           supplierId TEXT,
           reorderLevel INTEGER,
           imagePath TEXT,
+          soldByWeight INTEGER NOT NULL DEFAULT 0,
           createdAt TEXT NOT NULL,
           updatedAt TEXT NOT NULL,
           FOREIGN KEY (categoryId) REFERENCES categories(id)
@@ -375,6 +384,13 @@ class DatabaseService {
       } catch (e) {
         // Column already exists
       }
+      try {
+        await db.execute(
+          'ALTER TABLE products ADD COLUMN soldByWeight INTEGER NOT NULL DEFAULT 0',
+        );
+      } catch (e) {
+        // Column already exists
+      }
     }
 
     // Sales Table
@@ -395,6 +411,10 @@ class DatabaseService {
           paymentMethod TEXT NOT NULL,
           saleDate TEXT NOT NULL,
           notes TEXT,
+          customerName TEXT,
+          customerPhone TEXT,
+          cashAmount REAL NOT NULL DEFAULT 0,
+          cardAmount REAL NOT NULL DEFAULT 0,
           FOREIGN KEY (cashierId) REFERENCES users(id)
         )
       ''');
@@ -405,6 +425,20 @@ class DatabaseService {
         final names = columns.map((col) => col['name'] as String).toSet();
         if (!names.contains('invoiceNumber')) {
           await db.execute('ALTER TABLE sales ADD COLUMN invoiceNumber TEXT');
+        }
+        if (!names.contains('customerName')) {
+          await db.execute('ALTER TABLE sales ADD COLUMN customerName TEXT');
+        }
+        if (!names.contains('customerPhone')) {
+          await db.execute('ALTER TABLE sales ADD COLUMN customerPhone TEXT');
+        }
+        if (!names.contains('cashAmount')) {
+          await db.execute(
+              'ALTER TABLE sales ADD COLUMN cashAmount REAL NOT NULL DEFAULT 0');
+        }
+        if (!names.contains('cardAmount')) {
+          await db.execute(
+              'ALTER TABLE sales ADD COLUMN cardAmount REAL NOT NULL DEFAULT 0');
         }
       } catch (e) {
         developer.log('Sales migration error: $e', name: 'DatabaseService');
@@ -431,7 +465,7 @@ class DatabaseService {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           productId TEXT NOT NULL,
           productName TEXT NOT NULL,
-          quantityChanged INTEGER NOT NULL,
+          quantityChanged REAL NOT NULL,
           reason TEXT NOT NULL,
           createdAt TEXT NOT NULL,
           FOREIGN KEY (productId) REFERENCES products(id)
@@ -451,29 +485,14 @@ class DatabaseService {
           address TEXT,
           totalSpent REAL NOT NULL DEFAULT 0,
           totalTransactions INTEGER NOT NULL DEFAULT 0,
-          creditBalance REAL NOT NULL DEFAULT 0,
-          loyaltyPoints INTEGER NOT NULL DEFAULT 0,
           createdAt TEXT NOT NULL,
           lastPurchaseDate TEXT NOT NULL,
           isActive INTEGER NOT NULL DEFAULT 1
         )
       ''');
-    } else {
-      final customerColumns =
-          await db.rawQuery('PRAGMA table_info(customers)');
-      final customerColumnNames =
-          customerColumns.map((c) => c['name'] as String).toSet();
-      if (!customerColumnNames.contains('creditBalance')) {
-        await db.execute(
-          'ALTER TABLE customers ADD COLUMN creditBalance REAL NOT NULL DEFAULT 0',
-        );
-      }
-      if (!customerColumnNames.contains('loyaltyPoints')) {
-        await db.execute(
-          'ALTER TABLE customers ADD COLUMN loyaltyPoints INTEGER NOT NULL DEFAULT 0',
-        );
-      }
     }
+    // NOTE: legacy creditBalance/loyaltyPoints columns on old databases are
+    // intentionally left in place and ignored (feature removed).
 
     // Suppliers Table (NEW)
     final suppliersTableExists = await _tableExists(db, 'suppliers');
@@ -507,7 +526,8 @@ class DatabaseService {
           price REAL NOT NULL,
           sellingPrice REAL NOT NULL DEFAULT 0,
           expiryDate TEXT,
-          quantity INTEGER NOT NULL,
+          quantity REAL NOT NULL,
+          initialQuantity REAL NOT NULL DEFAULT 0,
           receivedDate TEXT NOT NULL,
           supplierId TEXT NOT NULL,
           notes TEXT,
@@ -526,6 +546,16 @@ class DatabaseService {
         if (!names.contains('sellingPrice')) {
           await db.execute(
             'ALTER TABLE product_batches ADD COLUMN sellingPrice REAL NOT NULL DEFAULT 0',
+          );
+        }
+        if (!names.contains('initialQuantity')) {
+          await db.execute(
+            'ALTER TABLE product_batches ADD COLUMN initialQuantity REAL NOT NULL DEFAULT 0',
+          );
+          // Existing rows only tracked remaining stock; treat it as the
+          // received quantity so bought/used reporting still makes sense.
+          await db.execute(
+            'UPDATE product_batches SET initialQuantity = quantity WHERE initialQuantity = 0',
           );
         }
       } catch (e) {
@@ -645,7 +675,7 @@ class DatabaseService {
           id TEXT PRIMARY KEY,
           productId TEXT NOT NULL,
           productName TEXT NOT NULL,
-          quantity INTEGER NOT NULL,
+          quantity REAL NOT NULL,
           reason TEXT NOT NULL,
           lossValue REAL NOT NULL,
           batchId TEXT NOT NULL DEFAULT '',
@@ -655,6 +685,28 @@ class DatabaseService {
           wastageDate TEXT NOT NULL,
           createdAt TEXT NOT NULL,
           FOREIGN KEY (productId) REFERENCES products(id)
+        )
+      ''');
+    }
+
+    // Supplier payments (cash / cheque made TO suppliers for goods received)
+    final supplierPaymentsTableExists =
+        await _tableExists(db, 'supplier_payments');
+    if (!supplierPaymentsTableExists) {
+      await db.execute('''
+        CREATE TABLE supplier_payments (
+          id TEXT PRIMARY KEY,
+          supplierId TEXT NOT NULL,
+          supplierName TEXT NOT NULL DEFAULT '',
+          amount REAL NOT NULL,
+          method TEXT NOT NULL,
+          chequeNumber TEXT NOT NULL DEFAULT '',
+          bankName TEXT NOT NULL DEFAULT '',
+          chequeDate TEXT,
+          note TEXT NOT NULL DEFAULT '',
+          paymentDate TEXT NOT NULL,
+          createdAt TEXT NOT NULL,
+          FOREIGN KEY (supplierId) REFERENCES suppliers(id)
         )
       ''');
     }
@@ -670,9 +722,6 @@ class DatabaseService {
           email TEXT NOT NULL,
           currency TEXT NOT NULL,
           currencySymbol TEXT NOT NULL,
-          taxNumber TEXT NOT NULL,
-          enableTax INTEGER NOT NULL,
-          taxPercentage REAL NOT NULL,
           printerName TEXT NOT NULL,
           enablePrinting INTEGER NOT NULL,
           paperWidth INTEGER NOT NULL,
@@ -681,6 +730,16 @@ class DatabaseService {
           googleDriveAccessToken TEXT NOT NULL DEFAULT '',
           googleDriveFolderId TEXT NOT NULL DEFAULT '',
           googleDriveAdminEmail TEXT NOT NULL DEFAULT '',
+          isServerMode INTEGER NOT NULL DEFAULT 0,
+          networkPort INTEGER NOT NULL DEFAULT 8180,
+          serverIpFallback TEXT NOT NULL DEFAULT '',
+          useAutoDiscovery INTEGER NOT NULL DEFAULT 1,
+          cashDrawerEnabled INTEGER NOT NULL DEFAULT 1,
+          cashDrawerPin INTEGER NOT NULL DEFAULT 2,
+          cashDrawerPulseOnMs INTEGER NOT NULL DEFAULT 120,
+          cashDrawerPulseOffMs INTEGER NOT NULL DEFAULT 240,
+          cashDrawerPrinterName TEXT NOT NULL DEFAULT '',
+          cashDrawerOpenOnCardOnly INTEGER NOT NULL DEFAULT 1,
           updatedAt TEXT NOT NULL
         )
       ''');
@@ -743,9 +802,161 @@ class DatabaseService {
             'ALTER TABLE shop_settings ADD COLUMN useAutoDiscovery INTEGER NOT NULL DEFAULT 1',
           );
         }
+        if (!names.contains('cashDrawerEnabled')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN cashDrawerEnabled INTEGER NOT NULL DEFAULT 1',
+          );
+        }
+        if (!names.contains('cashDrawerPin')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN cashDrawerPin INTEGER NOT NULL DEFAULT 2',
+          );
+        }
+        if (!names.contains('cashDrawerPulseOnMs')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN cashDrawerPulseOnMs INTEGER NOT NULL DEFAULT 120',
+          );
+        }
+        if (!names.contains('cashDrawerPulseOffMs')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN cashDrawerPulseOffMs INTEGER NOT NULL DEFAULT 240',
+          );
+        }
+        if (!names.contains('cashDrawerPrinterName')) {
+          await db.execute(
+            "ALTER TABLE shop_settings ADD COLUMN cashDrawerPrinterName TEXT NOT NULL DEFAULT ''",
+          );
+        }
+        if (!names.contains('cashDrawerOpenOnCardOnly')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN cashDrawerOpenOnCardOnly INTEGER NOT NULL DEFAULT 1',
+          );
+        }
       } catch (e) {
         developer.log('Settings migration error: $e', name: 'DatabaseService');
       }
+    }
+
+    // ============== FEATURE TABLES ==============
+    // Reload Cards (value ledger: each row is a Bought or Sold reload unit).
+    final reloadTableExists = await _tableExists(db, 'reload_cards');
+    if (!reloadTableExists) {
+      await db.execute('''
+        CREATE TABLE reload_cards (
+          id TEXT PRIMARY KEY,
+          cardNumber TEXT NOT NULL DEFAULT '',
+          batchId TEXT NOT NULL DEFAULT '',
+          supplier TEXT NOT NULL DEFAULT '',
+          value REAL NOT NULL,
+          cost REAL NOT NULL DEFAULT 0,
+          status TEXT NOT NULL,
+          customerPhone TEXT NOT NULL DEFAULT '',
+          customerName TEXT NOT NULL DEFAULT '',
+          createdAt TEXT NOT NULL,
+          usedAt TEXT NOT NULL DEFAULT '',
+          notes TEXT NOT NULL DEFAULT ''
+        )
+      ''');
+    } else {
+      try {
+        final reloadCols = await db.rawQuery('PRAGMA table_info(reload_cards)');
+        final hasBatchId =
+            reloadCols.any((col) => col['name'] == 'batchId');
+        if (!hasBatchId) {
+          await db.execute(
+            "ALTER TABLE reload_cards ADD COLUMN batchId TEXT NOT NULL DEFAULT ''",
+          );
+        }
+      } catch (e) {
+        developer.log('Reload migration error: $e', name: 'DatabaseService');
+      }
+    }
+
+    // Recipes (repack/packing recipes).
+    final recipesTableExists = await _tableExists(db, 'recipes');
+    if (!recipesTableExists) {
+      await db.execute('''
+        CREATE TABLE recipes (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          finishedProductId TEXT NOT NULL,
+          finishedProductName TEXT NOT NULL,
+          yieldQuantity REAL NOT NULL,
+          notes TEXT NOT NULL DEFAULT '',
+          createdAt TEXT NOT NULL,
+          updatedAt TEXT NOT NULL
+        )
+      ''');
+    }
+
+    final recipeItemsTableExists = await _tableExists(db, 'recipe_items');
+    if (!recipeItemsTableExists) {
+      await db.execute('''
+        CREATE TABLE recipe_items (
+          id TEXT PRIMARY KEY,
+          recipeId TEXT NOT NULL,
+          componentProductId TEXT NOT NULL,
+          componentName TEXT NOT NULL,
+          quantityNeeded REAL NOT NULL,
+          unit TEXT NOT NULL DEFAULT 'pcs'
+        )
+      ''');
+    }
+
+    // Productions (completed repack runs).
+    final productionsTableExists = await _tableExists(db, 'productions');
+    if (!productionsTableExists) {
+      await db.execute('''
+        CREATE TABLE productions (
+          id TEXT PRIMARY KEY,
+          recipeId TEXT NOT NULL,
+          recipeName TEXT NOT NULL,
+          finishedProductId TEXT NOT NULL,
+          finishedProductName TEXT NOT NULL,
+          quantityProduced REAL NOT NULL,
+          totalComponentCost REAL NOT NULL,
+          unitCost REAL NOT NULL,
+          batchNumber TEXT NOT NULL DEFAULT '',
+          notes TEXT NOT NULL DEFAULT '',
+          producedAt TEXT NOT NULL,
+          createdAt TEXT NOT NULL,
+          producedBy TEXT NOT NULL DEFAULT ''
+        )
+      ''');
+    }
+
+    final productionComponentsTableExists =
+        await _tableExists(db, 'production_components');
+    if (!productionComponentsTableExists) {
+      await db.execute('''
+        CREATE TABLE production_components (
+          id TEXT PRIMARY KEY,
+          productionId TEXT NOT NULL,
+          componentProductId TEXT NOT NULL,
+          componentName TEXT NOT NULL,
+          quantityUsed REAL NOT NULL,
+          costPerUnit REAL NOT NULL,
+          batchId TEXT NOT NULL DEFAULT '',
+          batchNumber TEXT NOT NULL DEFAULT ''
+        )
+      ''');
+    }
+
+    // Cash drawer pulse events (exactly-once tracking per sale).
+    final drawerTableExists = await _tableExists(db, 'drawer_events');
+    if (!drawerTableExists) {
+      await db.execute('''
+        CREATE TABLE drawer_events (
+          saleId TEXT PRIMARY KEY,
+          invoiceNumber TEXT NOT NULL DEFAULT '',
+          isCardOnly INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL,
+          printerName TEXT NOT NULL DEFAULT '',
+          errorMessage TEXT NOT NULL DEFAULT '',
+          createdAt TEXT NOT NULL,
+          updatedAt TEXT NOT NULL
+        )
+      ''');
     }
   }
 
@@ -765,6 +976,7 @@ class DatabaseService {
       category.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    BackupService.notifyTransaction('category');
   }
 
   Future<List<Category>> getAllCategories() async {
@@ -800,11 +1012,13 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [category.id],
     );
+    BackupService.notifyTransaction('category');
   }
 
   Future<void> deleteCategory(String id) async {
     final db = await database;
     await db.delete('categories', where: 'id = ?', whereArgs: [id]);
+    BackupService.notifyTransaction('category');
   }
 
   // ============== PRODUCTS ==============
@@ -836,6 +1050,7 @@ class DatabaseService {
       developer.log('Error inserting product: $e', name: 'DatabaseService');
       rethrow;
     }
+    BackupService.notifyTransaction('product');
   }
 
   Future<List<Product>> getAllProducts() async {
@@ -899,6 +1114,7 @@ class DatabaseService {
         }
       }
     });
+    BackupService.notifyTransaction('catalog sync');
   }
 
   /// Records a sale pushed to this PC by another terminal (the cashier).
@@ -954,6 +1170,7 @@ class DatabaseService {
       notes: incoming.notes,
     );
     await completeSale(sale, cartItems);
+    BackupService.notifyTransaction('sale');
     return sale;
   }
 
@@ -987,11 +1204,13 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [product.id],
     );
+    BackupService.notifyTransaction('product');
   }
 
   Future<void> deleteProduct(String id) async {
     final db = await database;
     await db.delete('products', where: 'id = ?', whereArgs: [id]);
+    BackupService.notifyTransaction('product');
   }
 
   Future<List<Product>> searchProducts(String query) async {
@@ -1022,6 +1241,7 @@ class DatabaseService {
       user.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    BackupService.notifyTransaction('user');
   }
 
   Future<User?> getUserByUsername(String username) async {
@@ -1060,11 +1280,13 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [user.id],
     );
+    BackupService.notifyTransaction('user');
   }
 
   Future<void> deleteUser(String id) async {
     final db = await database;
     await db.delete('users', where: 'id = ?', whereArgs: [id]);
+    BackupService.notifyTransaction('user');
   }
 
   // ============== SALES ==============
@@ -1077,6 +1299,7 @@ class DatabaseService {
       saleData,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    BackupService.notifyTransaction('sale');
   }
 
   Future<List<Sale>> getAllSales() async {
@@ -1133,6 +1356,103 @@ class DatabaseService {
       saleData['items'] = jsonDecode(saleData['items'] as String);
       return Sale.fromMap(saleData);
     }).toList();
+  }
+
+  // ============== RELOAD CARDS (VALUE LEDGER) ==============
+  /// All reload records, newest first. Each row is one Bought or Sold reload
+  /// unit; sold rows carry a [ReloadCard.batchId] back to the bought batch.
+  Future<List<ReloadCard>> getAllReloadCards() async {
+    final db = await database;
+    final maps = await db.query('reload_cards', orderBy: 'createdAt DESC');
+    return maps.map(ReloadCard.fromMap).toList();
+  }
+
+  Future<void> insertReloadCard(ReloadCard card) async {
+    final db = await database;
+    await db.insert(
+      'reload_cards',
+      card.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    BackupService.notifyTransaction('reload card');
+  }
+
+  Future<void> updateReloadCard(ReloadCard card) async {
+    final db = await database;
+    await db.update(
+      'reload_cards',
+      card.toMap(),
+      where: 'id = ?',
+      whereArgs: [card.id],
+    );
+    BackupService.notifyTransaction('reload card');
+  }
+
+  Future<void> deleteReloadCard(String id) async {
+    final db = await database;
+    await db.delete('reload_cards', where: 'id = ?', whereArgs: [id]);
+    BackupService.notifyTransaction('reload card');
+  }
+
+  // ============== CASH DRAWER EVENTS ==============
+  /// True when a drawer pulse has already been successfully sent for a sale,
+  /// so a double tap / app restart can never pop the drawer twice.
+  Future<bool> wasDrawerCommandSent(String saleId) async {
+    final db = await database;
+    final maps = await db.query(
+      'drawer_events',
+      columns: ['status'],
+      where: 'saleId = ? AND status = ?',
+      whereArgs: [saleId, 'sent'],
+      limit: 1,
+    );
+    return maps.isNotEmpty;
+  }
+
+  /// Records the outcome of a drawer pulse attempt (exactly one row per sale).
+  Future<void> upsertDrawerEvent({
+    required String saleId,
+    required String invoiceNumber,
+    required bool isCardOnly,
+    required String status,
+    required String printerName,
+    required String errorMessage,
+  }) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    final existing = await db.query(
+      'drawer_events',
+      columns: ['saleId'],
+      where: 'saleId = ?',
+      whereArgs: [saleId],
+      limit: 1,
+    );
+    if (existing.isEmpty) {
+      await db.insert('drawer_events', {
+        'saleId': saleId,
+        'invoiceNumber': invoiceNumber,
+        'isCardOnly': isCardOnly ? 1 : 0,
+        'status': status,
+        'printerName': printerName,
+        'errorMessage': errorMessage,
+        'createdAt': now,
+        'updatedAt': now,
+      });
+    } else {
+      await db.update(
+        'drawer_events',
+        {
+          'invoiceNumber': invoiceNumber,
+          'isCardOnly': isCardOnly ? 1 : 0,
+          'status': status,
+          'printerName': printerName,
+          'errorMessage': errorMessage,
+          'updatedAt': now,
+        },
+        where: 'saleId = ?',
+        whereArgs: [saleId],
+      );
+    }
   }
 
   // ============== INVOICE NUMBERING ==============
@@ -1201,7 +1521,7 @@ class DatabaseService {
   /// Works out which batches (oldest first) would fulfil [quantity] of
   /// [product], the effective sale price and the weighted cost. Read-only;
   /// the actual deduction happens in [completeSale].
-  Future<FifoPlan> getFifoPlan(Product product, int quantity) async {
+  Future<FifoPlan> getFifoPlan(Product product, double quantity) async {
     final db = await database;
     final batches = await _fifoBatches(db, product.id);
 
@@ -1209,7 +1529,7 @@ class DatabaseService {
     var remaining = quantity;
     double costSum = 0;
     double priceSum = 0;
-    var qtySum = 0;
+    var qtySum = 0.0;
 
     for (final batch in batches) {
       if (remaining <= 0) break;
@@ -1288,7 +1608,8 @@ class DatabaseService {
         );
         if (productMaps.isNotEmpty) {
           final product = Product.fromMap(productMaps.first);
-          final newQty = (product.quantity - item.quantity).clamp(0, 1 << 31);
+          final newQty =
+              (product.quantity - item.quantity).clamp(0.0, double.infinity);
           await txn.update(
             'products',
             {'quantity': newQty, 'updatedAt': now},
@@ -1306,6 +1627,7 @@ class DatabaseService {
         });
       }
     });
+    BackupService.notifyTransaction('bill');
   }
 
   /// Look up a product by barcode (exact) or, failing that, by exact name.
@@ -1384,6 +1706,7 @@ class DatabaseService {
             'product_batches',
             {
               'quantity': batch.quantity + item.quantity,
+              'initialQuantity': batch.initialQuantity + item.quantity,
               'price': item.costPrice,
               'sellingPrice': item.sellingPrice > 0
                   ? item.sellingPrice
@@ -1401,6 +1724,7 @@ class DatabaseService {
             'sellingPrice': item.sellingPrice,
             'expiryDate': item.expiryDate?.toIso8601String(),
             'quantity': item.quantity,
+            'initialQuantity': item.quantity,
             'receivedDate': grn.receivedDate.toIso8601String(),
             'supplierId': grn.supplierId,
             'notes': 'GRN ${grn.grnNumber}',
@@ -1425,6 +1749,7 @@ class DatabaseService {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
     });
+    BackupService.notifyTransaction('goods received');
   }
 
   Future<List<GoodsReceivedNote>> getAllGoodsReceivedNotes() async {
@@ -1438,7 +1763,7 @@ class DatabaseService {
   Future<void> addStockHistory(
     String productId,
     String productName,
-    int quantityChanged,
+    double quantityChanged,
     String reason,
   ) async {
     final db = await database;
@@ -1482,6 +1807,7 @@ class DatabaseService {
     if (updated == 0) {
       await db.insert('shop_settings', settings.toMap());
     }
+    BackupService.notifyTransaction('shop settings');
   }
 
   // ============== REPORTS ==============
@@ -1490,8 +1816,8 @@ class DatabaseService {
 
     double totalRevenue = 0;
     var totalTransactions = 0;
-    var totalItemsSold = 0;
-    final itemsBreakdown = <String, int>{};
+    var totalItemsSold = 0.0;
+    final itemsBreakdown = <String, double>{};
 
     for (final sale in sales) {
       totalRevenue += sale.totalAmount;
@@ -1528,7 +1854,7 @@ class DatabaseService {
 
     double totalRevenue = 0;
     var totalTransactions = 0;
-    final itemsBreakdown = <String, int>{};
+    final itemsBreakdown = <String, double>{};
     final dailyRevenue = <int, double>{};
 
     for (final sale in sales) {
@@ -1567,6 +1893,7 @@ class DatabaseService {
       customer.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    BackupService.notifyTransaction('customer');
   }
 
   Future<List<Customer>> getAllCustomers() async {
@@ -1602,11 +1929,13 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [customer.id],
     );
+    BackupService.notifyTransaction('customer');
   }
 
   Future<void> deleteCustomer(String id) async {
     final db = await database;
     await db.delete('customers', where: 'id = ?', whereArgs: [id]);
+    BackupService.notifyTransaction('customer');
   }
 
   Future<List<Customer>> searchCustomers(String query) async {
@@ -1631,52 +1960,17 @@ class DatabaseService {
     }
   }
 
-  Future<void> adjustCustomerCredit(
-    String customerId,
-    double amount, {
-    bool add = true,
-  }) async {
-    final customer = await getCustomerById(customerId);
-    if (customer == null) return;
-    final newBalance =
-        (add ? customer.creditBalance + amount : customer.creditBalance - amount)
-            .clamp(0, double.infinity)
-            .toDouble();
-    await updateCustomer(customer.copyWith(creditBalance: newBalance));
-  }
-
-  Future<void> adjustCustomerLoyaltyPoints(
-    String customerId,
-    int points,
-  ) async {
-    final customer = await getCustomerById(customerId);
-    if (customer == null) return;
-    final newPoints = (customer.loyaltyPoints + points).clamp(0, 1 << 31);
-    await updateCustomer(customer.copyWith(loyaltyPoints: newPoints));
-  }
-
-  Future<void> updateCustomerCreditAndLoyalty({
+  /// Bumps the customer's spend totals after a completed sale.
+  /// The POS is cash-and-carry only (no customer credit or loyalty).
+  Future<void> updateCustomerPurchaseStats({
     required String customerId,
     required double amountSpent,
-    required double amountReceived,
-    required double creditApplied,
-    required int redeemedPoints,
-    required int pointsEarned,
   }) async {
     final customer = await getCustomerById(customerId);
     if (customer == null) return;
-    // Only the credit actually applied toward the sale reduces the balance.
-    final creditAfter = (customer.creditBalance - creditApplied).clamp(
-      0.0,
-      double.infinity,
-    );
     final updatedCustomer = customer.copyWith(
       totalSpent: customer.totalSpent + amountSpent,
       totalTransactions: customer.totalTransactions + 1,
-      creditBalance: creditAfter,
-      loyaltyPoints: (customer.loyaltyPoints - redeemedPoints + pointsEarned)
-          .clamp(0, 1 << 31)
-          .toInt(),
       lastPurchaseDate: DateTime.now(),
     );
     await updateCustomer(updatedCustomer);
@@ -1690,6 +1984,7 @@ class DatabaseService {
       expense.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    BackupService.notifyTransaction('expense');
   }
 
   Future<List<Expense>> getAllExpenses() async {
@@ -1715,6 +2010,7 @@ class DatabaseService {
   Future<void> deleteExpense(String id) async {
     final db = await database;
     await db.delete('expenses', where: 'id = ?', whereArgs: [id]);
+    BackupService.notifyTransaction('expense');
   }
 
   /// Compute profit for a date range.
@@ -1765,6 +2061,215 @@ class DatabaseService {
     };
   }
 
+  /// Whole-shop profit and loss for a date range.
+  ///
+  /// Every part of the business is included so the owner sees one honest
+  /// number: billing (sales, discounts, cost of the goods sold), goods
+  /// received from suppliers, wastage, refunds, running expenses, money paid
+  /// to suppliers and what is still owed to them.
+  Future<Map<String, dynamic>> getBusinessProfitLoss(
+    DateTime start,
+    DateTime end,
+  ) async {
+    final db = await database;
+    final fromIso = start.toIso8601String();
+    final toIso = end.toIso8601String();
+
+    // ---- Billing -------------------------------------------------------
+    final products = await getAllProducts();
+    final costById = <String, double>{
+      for (final p in products) p.id: p.buyingPrice.toDouble(),
+    };
+
+    final saleRows = await db.query(
+      'sales',
+      where: 'saleDate >= ? AND saleDate <= ?',
+      whereArgs: [fromIso, toIso],
+    );
+
+    var revenue = 0.0;
+    var discounts = 0.0;
+    var cogs = 0.0;
+    var itemsSold = 0.0;
+    var cashSales = 0.0;
+    var cardSales = 0.0;
+    var splitSales = 0.0;
+
+    for (final row in saleRows) {
+      final total = (row['totalAmount'] as num?)?.toDouble() ?? 0;
+      revenue += total;
+      discounts += (row['totalDiscount'] as num?)?.toDouble() ?? 0;
+      cashSales += (row['cashAmount'] as num?)?.toDouble() ?? 0;
+      cardSales += (row['cardAmount'] as num?)?.toDouble() ?? 0;
+
+      final items = row['items'];
+      if (items is String) {
+        try {
+          final decoded = jsonDecode(items) as List;
+          for (final raw in decoded) {
+            final item = (raw as Map).map(
+              (key, value) => MapEntry(key.toString(), value),
+            );
+            final qty = (item['quantity'] as num?)?.toDouble() ?? 0;
+            final cost = (item['costPrice'] as num?)?.toDouble() ?? 0;
+            itemsSold += qty;
+            cogs += (cost > 0 ? cost : (costById[item['productId']] ?? 0)) * qty;
+          }
+        } catch (_) {
+          // A single unreadable bill must never break the whole report.
+        }
+      }
+    }
+
+    final bills = saleRows.length;
+    final grossProfit = revenue - cogs;
+
+    // ---- Wastage -------------------------------------------------------
+    final wasteRows = await db.query(
+      'wastages',
+      where: 'wastageDate >= ? AND wastageDate <= ?',
+      whereArgs: [fromIso, toIso],
+    );
+    var wastageLoss = 0.0;
+    var wastageUnits = 0.0;
+    for (final row in wasteRows) {
+      wastageLoss += (row['lossValue'] as num?)?.toDouble() ?? 0;
+      wastageUnits += (row['quantity'] as num?)?.toDouble() ?? 0;
+    }
+
+    // ---- Refunds (money only leaves on a processed refund) --------------
+    final refundRows = await db.query(
+      'refund_returns',
+      where: 'createdAt >= ? AND createdAt <= ?',
+      whereArgs: [fromIso, toIso],
+    );
+    var refundLoss = 0.0;
+    var refundPending = 0.0;
+    var refundProcessedCount = 0;
+    var refundPendingCount = 0;
+    for (final row in refundRows) {
+      final amount = (row['totalRefundAmount'] as num?)?.toDouble() ?? 0;
+      final status = (row['status'] as String? ?? '').toLowerCase();
+      if (status == 'processed') {
+        refundLoss += amount;
+        refundProcessedCount++;
+      } else if (status == 'pending' || status == 'approved') {
+        refundPending += amount;
+        refundPendingCount++;
+      }
+    }
+
+    // ---- Expenses ------------------------------------------------------
+    final expenseRows = await db.query(
+      'expenses',
+      where: 'expenseDate >= ? AND expenseDate <= ?',
+      whereArgs: [fromIso, toIso],
+    );
+    var expenseTotal = 0.0;
+    final expenseByCategory = <String, double>{};
+    for (final row in expenseRows) {
+      final amount = (row['amount'] as num?)?.toDouble() ?? 0;
+      final category =
+          (row['category'] as String? ?? '').trim().isEmpty
+              ? 'Other'
+              : (row['category'] as String).trim();
+      expenseTotal += amount;
+      expenseByCategory[category] =
+          (expenseByCategory[category] ?? 0) + amount;
+    }
+
+    // ---- Goods received (stock bought) ---------------------------------
+    final grnRows = await db.query(
+      'goods_received_notes',
+      where: 'receivedDate >= ? AND receivedDate <= ?',
+      whereArgs: [fromIso, toIso],
+    );
+    var purchaseTotal = 0.0;
+    for (final row in grnRows) {
+      purchaseTotal += (row['total'] as num?)?.toDouble() ?? 0;
+    }
+
+    // ---- Supplier payments (cash / cheque out) -------------------------
+    final paymentRows = await db.query(
+      'supplier_payments',
+      where: 'paymentDate >= ? AND paymentDate <= ?',
+      whereArgs: [fromIso, toIso],
+    );
+    var supplierPaid = 0.0;
+    var supplierPaidCash = 0.0;
+    var supplierPaidCheque = 0.0;
+    for (final row in paymentRows) {
+      final amount = (row['amount'] as num?)?.toDouble() ?? 0;
+      final method = (row['method'] as String? ?? '').toLowerCase();
+      supplierPaid += amount;
+      if (method.contains('cheq')) {
+        supplierPaidCheque += amount;
+      } else {
+        supplierPaidCash += amount;
+      }
+    }
+
+    // ---- Money still owed to suppliers ---------------------------------
+    var supplierOutstanding = 0.0;
+    try {
+      final suppliers = await getAllSuppliers(includeInactive: true);
+      for (final supplier in suppliers) {
+        supplierOutstanding += await getSupplierOutstanding(supplier.id);
+      }
+    } catch (_) {}
+
+    // ---- Stock on hand -------------------------------------------------
+    var stockValue = 0.0;
+    var stockItems = 0;
+    for (final p in products) {
+      if (p.quantity > 0) {
+        stockItems++;
+        stockValue += p.buyingPrice * p.quantity;
+      }
+    }
+
+    final totalLoss = cogs +
+        wastageLoss +
+        refundLoss +
+        expenseTotal;
+    final netProfit = revenue - totalLoss;
+
+    return {
+      'revenue': revenue,
+      'discounts': discounts,
+      'cogs': cogs,
+      'grossProfit': grossProfit,
+      'grossMarginPct': revenue > 0 ? (grossProfit / revenue) * 100 : 0.0,
+      'bills': bills,
+      'itemsSold': itemsSold,
+      'cashSales': cashSales,
+      'cardSales': cardSales,
+      'splitSales': splitSales,
+      'wastageLoss': wastageLoss,
+      'wastageUnits': wastageUnits,
+      'wastageCount': wasteRows.length,
+      'refundLoss': refundLoss,
+      'refundCount': refundProcessedCount,
+      'refundPending': refundPending,
+      'refundPendingCount': refundPendingCount,
+      'expenseTotal': expenseTotal,
+      'expenseCount': expenseRows.length,
+      'expenseByCategory': expenseByCategory,
+      'purchaseTotal': purchaseTotal,
+      'purchaseCount': grnRows.length,
+      'supplierPaid': supplierPaid,
+      'supplierPaidCount': paymentRows.length,
+      'supplierPaidCash': supplierPaidCash,
+      'supplierPaidCheque': supplierPaidCheque,
+      'supplierOutstanding': supplierOutstanding,
+      'stockValue': stockValue,
+      'stockItems': stockItems,
+      'productCount': products.length,
+      'netProfit': netProfit,
+      'isLoss': netProfit < 0,
+    };
+  }
+
   // ============== WASTAGE ==============
   /// Records wastage/damage/spoilage: deducts the units from the product (and
   /// optionally the owning batch), writes a wastage record and logs stock
@@ -1774,7 +2279,7 @@ class DatabaseService {
   Future<Wastage?> recordWastage({
     required String productId,
     required String productName,
-    required int quantity,
+    required double quantity,
     required String reason,
     String batchId = '',
     String batchNumber = '',
@@ -1808,7 +2313,7 @@ class DatabaseService {
           final batch = ProductBatch.fromMap(batchMaps.first);
           unitCost = batch.price > 0 ? batch.price : unitCost;
           final newBatchQty =
-              (batch.quantity - quantity).clamp(0, 1 << 31).toInt();
+              (batch.quantity - quantity).clamp(0.0, double.infinity);
           await txn.update(
             'product_batches',
             {'quantity': newBatchQty},
@@ -1818,7 +2323,8 @@ class DatabaseService {
         }
       }
 
-      final newQty = (product.quantity - quantity).clamp(0, 1 << 31).toInt();
+      final newQty =
+          (product.quantity - quantity).clamp(0.0, double.infinity);
       await txn.update(
         'products',
         {'quantity': newQty, 'updatedAt': now},
@@ -1850,6 +2356,9 @@ class DatabaseService {
       return true;
     });
 
+    if (ok) {
+      BackupService.notifyTransaction('wastage');
+    }
     return ok ? created : null;
   }
 
@@ -1874,7 +2383,7 @@ class DatabaseService {
     );
     final wastages = maps.map(Wastage.fromMap).toList();
 
-    var totalUnits = 0;
+    var totalUnits = 0.0;
     double totalLoss = 0;
     final byReason = <String, double>{};
     final byProduct = <String, double>{};
@@ -1924,6 +2433,7 @@ class DatabaseService {
       supplier.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    BackupService.notifyTransaction('supplier');
   }
 
   Future<List<Supplier>> getAllSuppliers({bool includeInactive = false}) async {
@@ -1956,11 +2466,81 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [supplier.id],
     );
+    BackupService.notifyTransaction('supplier');
   }
 
   Future<void> deleteSupplier(String id) async {
     final db = await database;
     await db.delete('suppliers', where: 'id = ?', whereArgs: [id]);
+    BackupService.notifyTransaction('supplier');
+  }
+
+  // ── Supplier payments ──────────────────────────────────────────
+
+  Future<void> recordSupplierPayment(SupplierPayment payment) async {
+    final db = await database;
+    await db.insert('supplier_payments', payment.toMap());
+    BackupService.notifyTransaction('supplier payment');
+  }
+
+  Future<void> deleteSupplierPayment(String paymentId) async {
+    final db = await database;
+    await db
+        .delete('supplier_payments', where: 'id = ?', whereArgs: [paymentId]);
+    BackupService.notifyTransaction('supplier payment');
+  }
+
+  Future<List<SupplierPayment>> getSupplierPayments(String supplierId) async {
+    final db = await database;
+    final maps = await db.query(
+      'supplier_payments',
+      where: 'supplierId = ?',
+      whereArgs: [supplierId],
+      orderBy: 'paymentDate DESC',
+    );
+    return maps.map(SupplierPayment.fromMap).toList();
+  }
+
+  Future<List<SupplierPayment>> getAllSupplierPayments() async {
+    final db = await database;
+    final maps =
+        await db.query('supplier_payments', orderBy: 'paymentDate DESC');
+    return maps.map(SupplierPayment.fromMap).toList();
+  }
+
+  /// What the shop still owes the supplier: total value of goods received
+  /// (all GRNs) minus everything already paid by cash or cheque.
+  Future<double> getSupplierOutstanding(String supplierId) async {
+    final db = await database;
+    final grnRows = await db.rawQuery(
+      'SELECT COALESCE(SUM(total), 0) AS t FROM goods_received_notes WHERE supplierId = ?',
+      [supplierId],
+    );
+    final payRows = await db.rawQuery(
+      'SELECT COALESCE(SUM(amount), 0) AS t FROM supplier_payments WHERE supplierId = ?',
+      [supplierId],
+    );
+    final received = (grnRows.first['t'] as num).toDouble();
+    final paid = (payRows.first['t'] as num).toDouble();
+    return received - paid;
+  }
+
+  Future<double> getSupplierTotalReceived(String supplierId) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT COALESCE(SUM(total), 0) AS t FROM goods_received_notes WHERE supplierId = ?',
+      [supplierId],
+    );
+    return (rows.first['t'] as num).toDouble();
+  }
+
+  Future<double> getSupplierTotalPaid(String supplierId) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT COALESCE(SUM(amount), 0) AS t FROM supplier_payments WHERE supplierId = ?',
+      [supplierId],
+    );
+    return (rows.first['t'] as num).toDouble();
   }
 
   // ============== PRODUCT BATCHES ==============
@@ -1971,6 +2551,7 @@ class DatabaseService {
       batch.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    BackupService.notifyTransaction('batch');
   }
 
   Future<List<ProductBatch>> getBatchesByProductId(String productId) async {
@@ -2005,11 +2586,12 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [batch.id],
     );
+    BackupService.notifyTransaction('batch');
   }
 
   /// Adds [delta] units to a batch's remaining quantity (used to put stock
   /// back when a sale line is refunded).
-  Future<void> addBatchQuantity(String batchId, int delta) async {
+  Future<void> addBatchQuantity(String batchId, double delta) async {
     if (batchId.isEmpty || delta == 0) return;
     final db = await database;
     final maps = await db.query(
@@ -2025,6 +2607,7 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [batchId],
     );
+    BackupService.notifyTransaction('batch');
   }
 
   /// Removes a stock batch and subtracts its remaining units from the product
@@ -2052,7 +2635,8 @@ class DatabaseService {
       );
       if (productMaps.isNotEmpty) {
         final product = Product.fromMap(productMaps.first);
-        final newQty = (product.quantity - batch.quantity).clamp(0, 1 << 31);
+        final newQty =
+            (product.quantity - batch.quantity).clamp(0.0, double.infinity);
         await txn.update(
           'products',
           {'quantity': newQty, 'updatedAt': DateTime.now().toIso8601String()},
@@ -2068,6 +2652,7 @@ class DatabaseService {
         });
       }
     });
+    BackupService.notifyTransaction('batch');
   }
 
   // ============== REFUND/RETURNS ==============
@@ -2081,6 +2666,7 @@ class DatabaseService {
       refundData,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    BackupService.notifyTransaction('refund');
   }
 
   Future<List<RefundReturn>> getAllRefunds() async {
@@ -2143,6 +2729,7 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [refund.id],
     );
+    BackupService.notifyTransaction('refund');
   }
 
   Future<List<RefundReturn>> getRefundsBySale(String saleId) async {
@@ -2174,6 +2761,7 @@ class DatabaseService {
       data,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    BackupService.notifyTransaction('purchase order');
   }
 
   Future<List<PurchaseOrder>> getAllPurchaseOrders() async {
@@ -2254,7 +2842,10 @@ class DatabaseService {
           final batch = ProductBatch.fromMap(existing.first);
           await txn.update(
             'product_batches',
-            {'quantity': batch.quantity + item.quantity},
+            {
+              'quantity': batch.quantity + item.quantity,
+              'initialQuantity': batch.initialQuantity + item.quantity,
+            },
             where: 'id = ?',
             whereArgs: [batch.id],
           );
@@ -2267,6 +2858,7 @@ class DatabaseService {
             'sellingPrice': product.sellingPrice,
             'expiryDate': null,
             'quantity': item.quantity,
+            'initialQuantity': item.quantity,
             'receivedDate': DateTime.now().toIso8601String(),
             'supplierId': order.supplierId,
             'notes': 'Received via ${order.orderNumber}',
@@ -2282,6 +2874,7 @@ class DatabaseService {
         whereArgs: [order.id],
       );
     });
+    BackupService.notifyTransaction('goods received');
   }
 
   Future<void> cancelPurchaseOrder(String id) async {
@@ -2292,6 +2885,7 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [id],
     );
+    BackupService.notifyTransaction('purchase order');
   }
 
   PurchaseOrder _decodePurchaseOrder(Map<String, dynamic> map) {

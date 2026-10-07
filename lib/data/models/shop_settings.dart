@@ -7,9 +7,6 @@ class ShopSettings {
     this.email = '',
     this.currency = 'LKR',
     this.currencySymbol = 'Rs.',
-    this.taxNumber = '',
-    this.enableTax = false,
-    this.taxPercentage = 0.0,
     this.printerName = 'Default Printer',
     this.enablePrinting = false,
     this.paperWidth = 80,
@@ -22,6 +19,12 @@ class ShopSettings {
     this.networkPort = 8180,
     this.serverIpFallback = '',
     this.useAutoDiscovery = true,
+    this.cashDrawerEnabled = true,
+    this.cashDrawerPin = 2,
+    this.cashDrawerPulseOnMs = 120,
+    this.cashDrawerPulseOffMs = 240,
+    this.cashDrawerPrinterName = '',
+    this.cashDrawerOpenOnCardOnly = true,
     DateTime? updatedAt,
   }) : updatedAt = updatedAt ?? DateTime.now();
 
@@ -32,9 +35,6 @@ class ShopSettings {
       email: map['email'] as String,
       currency: map['currency'] as String,
       currencySymbol: map['currencySymbol'] as String,
-      taxNumber: map['taxNumber'] as String,
-      enableTax: (map['enableTax'] as int?) == 1,
-      taxPercentage: (map['taxPercentage'] as num).toDouble(),
       printerName: map['printerName'] as String,
       enablePrinting: (map['enablePrinting'] as int?) == 1,
       paperWidth: map['paperWidth'] as int,
@@ -47,6 +47,12 @@ class ShopSettings {
       networkPort: map['networkPort'] as int? ?? 8180,
       serverIpFallback: map['serverIpFallback'] as String? ?? '',
       useAutoDiscovery: (map['useAutoDiscovery'] as int?) != 0,
+      cashDrawerEnabled: (map['cashDrawerEnabled'] as int?) != 0,
+      cashDrawerPin: map['cashDrawerPin'] as int? ?? 2,
+      cashDrawerPulseOnMs: map['cashDrawerPulseOnMs'] as int? ?? 120,
+      cashDrawerPulseOffMs: map['cashDrawerPulseOffMs'] as int? ?? 240,
+      cashDrawerPrinterName: map['cashDrawerPrinterName'] as String? ?? '',
+      cashDrawerOpenOnCardOnly: (map['cashDrawerOpenOnCardOnly'] as int?) != 0,
       updatedAt: DateTime.parse(map['updatedAt'] as String),
     );
   final String shopName;
@@ -55,9 +61,6 @@ class ShopSettings {
   final String email;
   final String currency;
   final String currencySymbol;
-  final String taxNumber;
-  final bool enableTax;
-  final double taxPercentage;
   final String printerName;
   final bool enablePrinting;
   final int paperWidth; // in mm
@@ -70,6 +73,12 @@ class ShopSettings {
   final int networkPort;
   final String serverIpFallback;
   final bool useAutoDiscovery;
+  final bool cashDrawerEnabled;
+  final int cashDrawerPin; // 2 or 5, per ESC/POS pulse pin
+  final int cashDrawerPulseOnMs;
+  final int cashDrawerPulseOffMs;
+  final String cashDrawerPrinterName; // empty = use billing printer
+  final bool cashDrawerOpenOnCardOnly;
   final DateTime updatedAt;
 
   ShopSettings copyWith({
@@ -79,9 +88,6 @@ class ShopSettings {
     String? email,
     String? currency,
     String? currencySymbol,
-    String? taxNumber,
-    bool? enableTax,
-    double? taxPercentage,
     String? printerName,
     bool? enablePrinting,
     int? paperWidth,
@@ -94,6 +100,12 @@ class ShopSettings {
     int? networkPort,
     String? serverIpFallback,
     bool? useAutoDiscovery,
+    bool? cashDrawerEnabled,
+    int? cashDrawerPin,
+    int? cashDrawerPulseOnMs,
+    int? cashDrawerPulseOffMs,
+    String? cashDrawerPrinterName,
+    bool? cashDrawerOpenOnCardOnly,
   }) => ShopSettings(
       shopName: shopName ?? this.shopName,
       address: address ?? this.address,
@@ -101,9 +113,6 @@ class ShopSettings {
       email: email ?? this.email,
       currency: currency ?? this.currency,
       currencySymbol: currencySymbol ?? this.currencySymbol,
-      taxNumber: taxNumber ?? this.taxNumber,
-      enableTax: enableTax ?? this.enableTax,
-      taxPercentage: taxPercentage ?? this.taxPercentage,
       printerName: printerName ?? this.printerName,
       enablePrinting: enablePrinting ?? this.enablePrinting,
       paperWidth: paperWidth ?? this.paperWidth,
@@ -119,6 +128,14 @@ class ShopSettings {
         networkPort: networkPort ?? this.networkPort,
         serverIpFallback: serverIpFallback ?? this.serverIpFallback,
         useAutoDiscovery: useAutoDiscovery ?? this.useAutoDiscovery,
+        cashDrawerEnabled: cashDrawerEnabled ?? this.cashDrawerEnabled,
+        cashDrawerPin: cashDrawerPin ?? this.cashDrawerPin,
+        cashDrawerPulseOnMs: cashDrawerPulseOnMs ?? this.cashDrawerPulseOnMs,
+        cashDrawerPulseOffMs: cashDrawerPulseOffMs ?? this.cashDrawerPulseOffMs,
+        cashDrawerPrinterName:
+          cashDrawerPrinterName ?? this.cashDrawerPrinterName,
+        cashDrawerOpenOnCardOnly:
+          cashDrawerOpenOnCardOnly ?? this.cashDrawerOpenOnCardOnly,
     );
 
   Map<String, dynamic> toMap() => {
@@ -128,9 +145,6 @@ class ShopSettings {
       'email': email,
       'currency': currency,
       'currencySymbol': currencySymbol,
-      'taxNumber': taxNumber,
-      'enableTax': enableTax ? 1 : 0,
-      'taxPercentage': taxPercentage,
       'printerName': printerName,
       'enablePrinting': enablePrinting ? 1 : 0,
       'paperWidth': paperWidth,
@@ -143,6 +157,12 @@ class ShopSettings {
       'networkPort': networkPort,
       'serverIpFallback': serverIpFallback,
       'useAutoDiscovery': useAutoDiscovery ? 1 : 0,
+      'cashDrawerEnabled': cashDrawerEnabled ? 1 : 0,
+      'cashDrawerPin': cashDrawerPin,
+      'cashDrawerPulseOnMs': cashDrawerPulseOnMs,
+      'cashDrawerPulseOffMs': cashDrawerPulseOffMs,
+      'cashDrawerPrinterName': cashDrawerPrinterName,
+      'cashDrawerOpenOnCardOnly': cashDrawerOpenOnCardOnly ? 1 : 0,
       'updatedAt': updatedAt.toIso8601String(),
     };
 }

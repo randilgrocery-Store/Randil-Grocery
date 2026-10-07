@@ -129,6 +129,21 @@ class ProductProvider extends ChangeNotifier {
   List<Product> getOutOfStockProducts() =>
       _products.where((p) => p.quantity <= 0).toList();
 
+  /// The ONE stock-health view used by the redesigned dashboard, sidebar badge
+  /// and alerts panel (Q1 decision).
+  ///
+  /// Rule: `qty <= 0` is **Out of stock**, `qty < (reorderLevel ?? 10)` is
+  /// **Low**, everything above that is **Normal**. Reorder candidates are Low
+  /// + Out. Read-only — the four dashboards' existing low/out methods above
+  /// are left untouched.
+  List<Product> get reorderCandidates =>
+      List.unmodifiable(_products.where(_isReorderCandidate));
+
+  bool _isReorderCandidate(Product p) {
+    if (p.quantity <= 0) return true;
+    return p.quantity < (p.reorderLevel ?? 10);
+  }
+
   bool isProductAvailable(String productId) {
     final product = _products.firstWhere((p) => p.id == productId,
         orElse: () => Product(

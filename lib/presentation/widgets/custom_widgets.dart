@@ -1,5 +1,18 @@
 import 'package:flutter/material.dart';
 
+import '../components/app_card.dart';
+import '../components/app_states.dart';
+import '../components/section_header.dart';
+import '../theme/app_tokens.dart';
+
+/// Formats a quantity for display: whole numbers print without decimals
+/// ('5'), fractional (weighed) amounts print trimmed ('0.5', '1.25').
+String fmtQty(num q) {
+  if (q % 1 == 0) return q.toInt().toString();
+  final s = q.toStringAsFixed(3);
+  return s.replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '');
+}
+
 class PosAppTheme {
   // Colors
   static const Color primaryGreen = Color(0xFF00843D); // Keells Green
@@ -203,6 +216,8 @@ class GroceryTextField extends StatelessWidget {
     );
 }
 
+/// Legacy name for [AppCard]. The constructor signature is unchanged; the body
+/// now delegates so the whole app shares one card radius, padding and shadow.
 class GroceryCard extends StatelessWidget {
 
   const GroceryCard({
@@ -219,21 +234,16 @@ class GroceryCard extends StatelessWidget {
   final BorderRadius? borderRadius;
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-      onTap: onTap,
-      child: Card(
-        color: backgroundColor,
-        shape: RoundedRectangleBorder(
-          borderRadius: borderRadius ?? BorderRadius.circular(12),
-        ),
-        child: Padding(
-          padding: padding ?? const EdgeInsets.all(16),
-          child: child,
-        ),
-      ),
-    );
+  Widget build(BuildContext context) => AppCard(
+        padding: padding ?? AppSpacing.card,
+        onTap: onTap,
+        backgroundColor: backgroundColor,
+        borderRadius: borderRadius,
+        child: child,
+      );
 }
 
+/// Legacy name for [AppSectionHeader]. Signature unchanged.
 class SectionHeader extends StatelessWidget {
 
   const SectionHeader({
@@ -246,33 +256,11 @@ class SectionHeader extends StatelessWidget {
   final Widget? action;
 
   @override
-  Widget build(BuildContext context) => Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: PosAppTheme.textDark,
-              ),
-            ),
-            if (subtitle != null)
-              Text(
-                subtitle!,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: PosAppTheme.textGray,
-                ),
-              ),
-          ],
-        ),
-        if (action != null) action!,
-      ],
-    );
+  Widget build(BuildContext context) => AppSectionHeader(
+        title: title,
+        subtitle: subtitle,
+        action: action,
+      );
 }
 
 class StatCard extends StatelessWidget {
@@ -346,7 +334,7 @@ class ProductCard extends StatelessWidget {
   final String name;
   final String barcode;
   final double price;
-  final int quantity;
+  final double quantity;
   final String category;
   final VoidCallback onTap;
   final VoidCallback? onEdit;
@@ -442,7 +430,7 @@ class ProductCard extends StatelessWidget {
                 ),
               ),
               Text(
-                'Stock: $quantity',
+                'Stock: ${fmtQty(quantity)}',
                 style: TextStyle(
                   fontSize: 12,
                   color:
@@ -493,6 +481,7 @@ class ProductCard extends StatelessWidget {
   }
 }
 
+/// Legacy name for [AppEmptyState]. Signature unchanged.
 class EmptyState extends StatelessWidget {
 
   const EmptyState({
@@ -505,30 +494,12 @@ class EmptyState extends StatelessWidget {
   final Widget? action;
 
   @override
-  Widget build(BuildContext context) => Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(icon, size: 64, color: PosAppTheme.textGray.withOpacity(0.5)),
-          const SizedBox(height: 16),
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-              color: PosAppTheme.textDark,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            message,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 14, color: PosAppTheme.textGray),
-          ),
-          if (action != null) ...[const SizedBox(height: 16), action!],
-        ],
-      ),
-    );
+  Widget build(BuildContext context) => AppEmptyState(
+        icon: icon,
+        title: title,
+        message: message,
+        action: action,
+      );
 }
 
 class DashboardHeroPanel extends StatelessWidget {
@@ -601,4 +572,134 @@ class DashboardHeroPanel extends StatelessWidget {
           ],
         ),
       );
+}
+
+/// Shows a small toast as an overlay at the top-right of the screen.
+/// Drop-in replacement for bottom SnackBars across the app.
+void showPosToast(BuildContext context, String message,
+    {bool isSuccess = true, Duration duration = const Duration(seconds: 3)}) {
+  final overlay = Overlay.maybeOf(context);
+  if (overlay == null) return;
+  late final OverlayEntry entry;
+  entry = OverlayEntry(
+    builder: (_) => _PosToastWidget(message: message, isSuccess: isSuccess),
+  );
+  overlay.insert(entry);
+  Future.delayed(duration, () {
+    if (entry.mounted) entry.remove();
+  });
+}
+
+class _PosToastWidget extends StatefulWidget {
+  const _PosToastWidget({required this.message, required this.isSuccess});
+
+  final String message;
+  final bool isSuccess;
+
+  @override
+  State<_PosToastWidget> createState() => _PosToastWidgetState();
+}
+
+class _PosToastWidgetState extends State<_PosToastWidget>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 250),
+  )..forward();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color =
+        widget.isSuccess ? PosAppTheme.successGreen : PosAppTheme.dangerRed;
+    return Positioned(
+      top: 72,
+      right: 16,
+      child: FadeTransition(
+        opacity: _controller,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0.15, -0.1),
+            end: Offset.zero,
+          ).animate(CurvedAnimation(
+            parent: _controller,
+            curve: Curves.easeOutCubic,
+          )),
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 320),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(10),
+                boxShadow: [
+                  BoxShadow(
+                    color: color.withOpacity(0.35),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    widget.isSuccess
+                        ? Icons.check_circle_outline
+                        : Icons.error_outline,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      widget.message,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shows a [SnackBar] as a small floating block pinned to the top-right of
+/// the screen (below the app bar, above the cart column) instead of the
+/// default bottom position. Drop-in replacement for
+/// `ScaffoldMessenger.of(context).showSnackBar(snackBar)`.
+void showTopSnackBar(BuildContext context, SnackBar snackBar) {
+  final size = MediaQuery.of(context).size;
+  final left = size.width - 360;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: snackBar.content,
+      backgroundColor:
+          snackBar.backgroundColor ?? PosAppTheme.textDark,
+      duration: snackBar.duration,
+      action: snackBar.action,
+      behavior: SnackBarBehavior.floating,
+      shape: snackBar.shape ??
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      margin: EdgeInsets.only(
+        left: left < 16 ? 16 : left,
+        right: 16,
+        bottom: size.height - 130,
+      ),
+    ),
+  );
 }

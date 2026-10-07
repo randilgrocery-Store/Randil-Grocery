@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../../data/models/sale.dart';
@@ -16,8 +17,14 @@ import '../../providers/refund_return_provider.dart';
 import '../../providers/reports_provider.dart';
 import '../../providers/sales_provider.dart';
 import '../../providers/settings_provider.dart';
+import '../../shell/app_sidebar.dart';
+import '../../shell/app_top_bar.dart';
+import '../../shell/command_palette.dart';
+import '../../theme/app_colors.dart';
+import '../../theme/app_tokens.dart';
 import '../../widgets/custom_widgets.dart';
 import '../admin/customer_management_screen.dart';
+import '../admin/repack_screen.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../inventory/batch_management_screen.dart';
 import '../inventory/grn_screen.dart';
@@ -26,6 +33,7 @@ import '../inventory/purchase_order_screen.dart';
 import '../inventory/wastage_management_screen.dart';
 import '../pos/pos_screen.dart';
 import '../refunds/refund_return_screen.dart';
+import '../reload_cards/reload_card_screen.dart';
 import '../reports/expense_management_screen.dart';
 import '../reports/reports_screen.dart';
 import '../settings/settings_screen.dart';
@@ -41,6 +49,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   int _selectedIndex = 0;
+  bool _sidebarCollapsed = false;
   late AnimationController _pageTransitionController;
   late Animation<double> _fadeAnimation;
   late Animation<Offset> _slideAnimation;
@@ -59,6 +68,8 @@ class _HomeScreenState extends State<HomeScreen>
     'Customers',
     'Expenses',
     'Wastage',
+    'Production',
+    'Reload',
     'Reports',
     'Settings',
   ];
@@ -75,6 +86,8 @@ class _HomeScreenState extends State<HomeScreen>
     Icons.people,
     Icons.receipt_long,
     Icons.delete_sweep,
+    Icons.factory,
+    Icons.sim_card,
     Icons.assessment,
     Icons.settings,
   ];
@@ -169,6 +182,33 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  void _toggleSidebar() {
+    setState(() {
+      _sidebarCollapsed = !_sidebarCollapsed;
+    });
+  }
+
+  /// Ctrl+K command palette. Navigates to whichever screen the user picked.
+  Future<void> _openCommandPalette() async {
+    final authProvider = context.read<AuthProvider>();
+    final isAdmin = authProvider.currentUser?.role == UserRole.admin;
+    final navLabels = isAdmin ? _adminNavLabels : _cashierNavLabels;
+    final navIcons = isAdmin ? _adminNavIcons : _cashierNavIcons;
+
+    final target = await showDialog<int>(
+      context: context,
+      builder: (_) => AppCommandPalette(
+        isAdmin: isAdmin,
+        labels: navLabels,
+        icons: navIcons,
+        selectedIndex: _selectedIndex,
+      ),
+    );
+    if (target != null && mounted) {
+      _handleNavigation(target);
+    }
+  }
+
   void _refreshDashboard() {
     Future.delayed(const Duration(milliseconds: 100), () {
       if (mounted) {
@@ -187,8 +227,8 @@ class _HomeScreenState extends State<HomeScreen>
           onNavigateToPos: () => _handleNavigation(1),
           onNavigateToRefunds: () => _handleNavigation(7),
           onNavigateToInventory: () => _handleNavigation(2),
-          onNavigateToReports: () => _handleNavigation(11),
-          onNavigateToSettings: () => _handleNavigation(12),
+          onNavigateToReports: () => _handleNavigation(13),
+          onNavigateToSettings: () => _handleNavigation(14),
         ),
         const PosScreen(),
         const InventoryScreen(),
@@ -200,6 +240,8 @@ class _HomeScreenState extends State<HomeScreen>
         const CustomerManagementScreen(),
         const ExpenseManagementScreen(),
         const WastageManagementScreen(),
+        const RepackScreen(),
+        const ReloadCardScreen(),
         const ReportsScreen(),
         const SettingsScreen(),
       ];
@@ -229,7 +271,7 @@ class _HomeScreenState extends State<HomeScreen>
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
             style: ElevatedButton.styleFrom(
-              backgroundColor: PosAppTheme.dangerRed,
+              backgroundColor: context.appColors.danger,
             ),
             child: const Text('Logout'),
           ),
@@ -269,174 +311,80 @@ class _HomeScreenState extends State<HomeScreen>
 
           return WillPopScope(
             onWillPop: () async => false,
-            child: Scaffold(
-              appBar: AppBar(
-                title: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      clipBehavior: Clip.antiAlias,
-                      child: Image.asset(
-                        'assets/images/randil_logo.png',
-                        fit: BoxFit.cover,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Randil Grocery POS',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
+            child: CallbackShortcuts(
+              bindings: {
+                const SingleActivator(
+                  LogicalKeyboardKey.keyK,
+                  control: true,
+                ): _openCommandPalette,
+              },
+              child: Focus(
+                autofocus: true,
+                child: Scaffold(
+                  body: LayoutBuilder(
+                    builder: (context, constraints) {
+                      // Auto-collapse the rail on narrow windows; the manual
+                      // toggle stays free once the window is wide enough.
+                      final autoCollapsed = constraints.maxWidth <
+                          AppBreakpoints.sidebarAutoCollapseBelow;
+                      final collapsed = _sidebarCollapsed || autoCollapsed;
+
+                      return Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          AppSidebar(
+                            isAdmin: isAdmin,
+                            labels: navLabels,
+                            icons: navIcons,
+                            selectedIndex: safeIndex,
+                            collapsed: collapsed,
+                            onToggleCollapsed: _toggleSidebar,
+                            onSelect: _handleNavigation,
                           ),
-                        ),
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 260),
-                          switchInCurve: Curves.easeOut,
-                          switchOutCurve: Curves.easeIn,
-                          transitionBuilder: (child, animation) =>
-                              FadeTransition(
-                            opacity: animation,
-                            child: SlideTransition(
-                              position: Tween<Offset>(
-                                      begin: const Offset(0, 0.2),
-                                      end: Offset.zero)
-                                  .animate(animation),
-                              child: child,
+                          Expanded(
+                            child: Column(
+                              children: [
+                                AppTopBar(
+                                  title: navLabels[safeIndex],
+                                  userName: user?.fullName ?? 'User',
+                                  isAdmin: isAdmin,
+                                  onLogout: _handleLogout,
+                                  onOpenInventory: () =>
+                                      _handleNavigation(isAdmin ? 2 : 2),
+                                ),
+                                Expanded(
+                                  child: FutureBuilder<void>(
+                                    future: _initFuture,
+                                    builder: (context, snapshot) {
+                                      if (snapshot.connectionState ==
+                                          ConnectionState.waiting) {
+                                        return const Center(
+                                          child: CircularProgressIndicator(),
+                                        );
+                                      }
+                                      if (snapshot.hasError) {
+                                        return Center(
+                                          child: Text(
+                                            'Error: ${snapshot.error}',
+                                          ),
+                                        );
+                                      }
+                                      return SlideTransition(
+                                        position: _slideAnimation,
+                                        child: FadeTransition(
+                                          opacity: _fadeAnimation,
+                                          child: screens[safeIndex],
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                          child: Text(
-                            navLabels[safeIndex],
-                            key: ValueKey('tab_title_$safeIndex'),
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                elevation: 2,
-                actions: [
-                  Consumer<NetworkProvider>(
-                    builder: (context, network, child) {
-                      final (color, icon) = switch (network.mode) {
-                        NetworkMode.server => (
-                            PosAppTheme.successGreen,
-                            Icons.dns,
-                          ),
-                        NetworkMode.client => switch (network.connectState) {
-                            ClientConnectState.connected => (
-                                PosAppTheme.successGreen,
-                                Icons.wifi,
-                              ),
-                            ClientConnectState.connecting => (
-                                PosAppTheme.warningOrange,
-                                Icons.wifi_find,
-                              ),
-                            ClientConnectState.idle ||
-                            ClientConnectState.offline => (
-                                PosAppTheme.dangerRed,
-                                Icons.wifi_off,
-                              ),
-                          },
-                        NetworkMode.standalone => (
-                            PosAppTheme.textGray,
-                            Icons.computer,
-                          ),
-                      };
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        child: Center(
-                          child: Chip(
-                            avatar: Icon(icon, size: 18, color: color),
-                            label: Text(
-                              network.statusLabel,
-                              style: TextStyle(
-                                color: color,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            backgroundColor: color.withOpacity(0.12),
-                            side: BorderSide(color: color.withOpacity(0.4)),
-                          ),
-                        ),
+                        ],
                       );
                     },
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Center(
-                      child: Chip(
-                        avatar: const Icon(Icons.person, size: 18),
-                        label: Text(
-                            '${user?.fullName} (${isAdmin ? 'Admin' : 'Cashier'})'),
-                        backgroundColor: Colors.white.withOpacity(0.2),
-                      ),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(right: 16),
-                    child: Center(
-                      child: TextButton.icon(
-                        onPressed: _handleLogout,
-                        icon: const Icon(Icons.logout),
-                        label: const Text('Logout'),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              body: FutureBuilder<void>(
-                future: _initFuture,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(
-                      child: CircularProgressIndicator(),
-                    );
-                  }
-                  if (snapshot.hasError) {
-                    return Center(
-                      child: Text('Error: ${snapshot.error}'),
-                    );
-                  }
-                  return SlideTransition(
-                    position: _slideAnimation,
-                    child: FadeTransition(
-                      opacity: _fadeAnimation,
-                      child: screens[safeIndex],
-                    ),
-                  );
-                },
-              ),
-              bottomNavigationBar: BottomNavigationBar(
-                currentIndex: safeIndex,
-                onTap: _handleNavigation,
-                type: BottomNavigationBarType.fixed,
-                selectedItemColor: PosAppTheme.primaryGreen,
-                unselectedItemColor: Colors.grey,
-                backgroundColor: Colors.white,
-                elevation: 8,
-                items: List.generate(
-                  navLabels.length,
-                  (index) => BottomNavigationBarItem(
-                    icon: AnimatedBuilder(
-                      animation: _pageTransitionController,
-                      builder: (context, child) => Transform.scale(
-                        scale: safeIndex == index
-                            ? 1.0 + (_pageTransitionController.value * 0.1)
-                            : 1.0,
-                        child: Icon(navIcons[index]),
-                      ),
-                    ),
-                    label: navLabels[index],
                   ),
                 ),
               ),
@@ -642,12 +590,15 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
       unawaited(CustomerDisplayService.instance.syncNow());
     }
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      final err = CustomerDisplayService.instance.lastError;
+      showTopSnackBar(context,
         SnackBar(
           content: Text(on
               ? 'Customer Display is now showing on the second screen'
-              : 'Customer Display closed'),
-          duration: const Duration(seconds: 2),
+              : err != null
+                  ? 'Customer Display could not open: $err'
+                  : 'Customer Display closed'),
+          duration: const Duration(seconds: 4),
         ),
       );
     }
@@ -684,10 +635,11 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
                   0,
                   (sum, sale) => sum + sale.totalAmount,
                 );
-                final itemsSold = myTodaySales.fold<int>(
+                final itemsSold = myTodaySales.fold<double>(
                   0,
-                  (sum, sale) =>
-                      sum + sale.items.fold<int>(0, (s, item) => s + item.quantity),
+                  (sum, sale) => sum +
+                      sale.items.fold<double>(
+                          0, (s, item) => s + item.quantity),
                 );
 
                 return Consumer<RefundReturnProvider>(
@@ -781,7 +733,7 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
     required User? user,
     required String dateLabel,
     required List<Sale> todaySales,
-    required int itemsSold,
+    required double itemsSold,
   }) {
     final total = todaySales.fold<double>(
         0, (sum, sale) => sum + sale.totalAmount);
@@ -938,7 +890,7 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '$itemsSold items sold',
+                          '${fmtQty(itemsSold)} items sold',
                           style: TextStyle(
                             color: Colors.white.withOpacity(0.8),
                             fontSize: 12,
@@ -1010,7 +962,7 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
   Widget _buildKpiRow({
     required int salesCount,
     required double revenue,
-    required int itemsSold,
+    required double itemsSold,
     required int pendingReturns,
     required int requestsToday,
   }) {
@@ -1045,7 +997,7 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
             2 => _kpiCard(
                 icon: Icons.shopping_basket,
                 label: 'Items Sold',
-                value: '$itemsSold',
+                value: fmtQty(itemsSold),
                 color: PosAppTheme.warningOrange,
               ),
             _ => _kpiCard(

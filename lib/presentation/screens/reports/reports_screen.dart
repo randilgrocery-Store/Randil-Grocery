@@ -88,7 +88,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                     final sale = sales[index];
                     final itemsText = sale.items
                         .map((item) =>
-                            '${item.productName} x${item.quantity} (Rs. ${item.total.toStringAsFixed(2)})')
+                            '${item.productName} x${fmtQty(item.quantity)} (Rs. ${item.total.toStringAsFixed(2)})')
                         .join(', ');
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -145,8 +145,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
     double cashTotal = 0;
     double cardTotal = 0;
     double discountTotal = 0;
-    int totalItems = 0;
-    final itemQty = <String, int>{};
+    var totalItems = 0.0;
+    final itemQty = <String, double>{};
     final itemRevenue = <String, double>{};
 
     for (final sale in sales) {
@@ -175,7 +175,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
       ..writeln(center(DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now())))
       ..writeln(rule('='))
       ..writeln(pair('Transactions', '${sales.length}'))
-      ..writeln(pair('Items Sold', '$totalItems'))
+      ..writeln(pair('Items Sold', fmtQty(totalItems)))
       ..writeln(rule('-'))
       ..writeln(pair('Revenue', '$symbol ${totalRevenue.toStringAsFixed(2)}'))
       ..writeln(pair('Cash', '$symbol ${cashTotal.toStringAsFixed(2)}'))
@@ -252,7 +252,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
       return;
     }
     if (printerName.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         const SnackBar(
           content: Text('No printer found. Install your printer first.'),
           backgroundColor: Color(0xFFD32F2F),
@@ -269,7 +269,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
+    showTopSnackBar(context, 
       SnackBar(
         content: Text(ok
             ? 'Report printed successfully'
@@ -481,7 +481,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                         StatCard(
                           icon: Icons.shopping_bag,
                           label: 'Items Sold',
-                          value: (report['totalItemsSold'] as int).toString(),
+                          value: fmtQty(report['totalItemsSold'] as num),
                           color: PosAppTheme.accentBlue,
                         ),
                       ],
@@ -523,7 +523,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                                                   BorderRadius.circular(4),
                                             ),
                                             child: Text(
-                                              '${entry.value} units',
+                                              '${fmtQty(entry.value as num)} units',
                                               style: const TextStyle(
                                                 fontWeight: FontWeight.bold,
                                                 color: PosAppTheme.primaryGreen,
@@ -663,7 +663,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                     GroceryCard(
                       child: Column(
                         children: (report['bestSellingItems']
-                                as List<MapEntry<String, int>>)
+                                as List<MapEntry<String, double>>)
                             .map(
                               (entry) => Padding(
                                 padding: const EdgeInsets.symmetric(
@@ -687,7 +687,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                                         ),
                                       ),
                                       child: Text(
-                                        '${entry.value} units',
+                                        '${fmtQty(entry.value as num)} units',
                                         style: const TextStyle(
                                           fontWeight: FontWeight.bold,
                                           color: PosAppTheme.successGreen,

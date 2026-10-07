@@ -19,7 +19,10 @@ import 'presentation/providers/purchase_order_provider.dart';
 import 'presentation/providers/expense_provider.dart';
 import 'presentation/providers/grn_provider.dart';
 import 'presentation/providers/network_provider.dart';
+import 'presentation/providers/profit_loss_provider.dart';
 import 'presentation/providers/refund_return_provider.dart';
+import 'presentation/providers/reload_card_provider.dart';
+import 'presentation/providers/repack_provider.dart';
 import 'presentation/providers/reports_provider.dart';
 import 'presentation/providers/sales_provider.dart';
 import 'presentation/providers/settings_provider.dart';
@@ -29,6 +32,7 @@ import 'presentation/providers/wastage_provider.dart';
 import 'presentation/screens/auth/login_screen.dart';
 import 'presentation/screens/dashboard/home_screen.dart';
 import 'presentation/screens/pos/customer_display_screen.dart';
+import 'presentation/theme/app_theme.dart';
 
 void main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -53,7 +57,7 @@ void main(List<String> args) async {
       center: true,
       title: 'Randil Grocery POS',
       size: Size(1366, 860),
-      minimumSize: Size(1024, 700),
+      minimumSize: Size(1280, 760),
       backgroundColor: Color(0xFFF5F6FA),
       skipTaskbar: false,
       titleBarStyle: TitleBarStyle.normal,
@@ -104,6 +108,7 @@ class RandilGroceryPOS extends StatelessWidget {
           ChangeNotifierProvider(create: (_) => SalesProvider()),
           ChangeNotifierProvider(create: (_) => SettingsProvider()),
           ChangeNotifierProvider(create: (_) => ReportsProvider()),
+          ChangeNotifierProvider(create: (_) => ProfitLossProvider()),
           ChangeNotifierProvider(create: (_) => CustomerProvider()),
           ChangeNotifierProvider(create: (_) => SupplierProvider()),
           ChangeNotifierProvider(create: (_) => BatchProvider()),
@@ -113,13 +118,18 @@ class RandilGroceryPOS extends StatelessWidget {
           ChangeNotifierProvider(create: (_) => ExpenseProvider()),
           ChangeNotifierProvider(create: (_) => GrnProvider()),
           ChangeNotifierProvider(create: (_) => WastageProvider()),
+          ChangeNotifierProvider(create: (_) => ReloadCardProvider()),
+          ChangeNotifierProvider(create: (_) => RepackProvider()),
           ChangeNotifierProvider(create: (_) => NetworkProvider()..init()),
         ],
         child: Consumer<ThemeProvider>(
           builder: (context, themeProvider, child) => MaterialApp(
             title: 'Randil Grocery POS',
-            theme: themeProvider.lightTheme,
-            darkTheme: themeProvider.darkTheme,
+            // AppTheme.of() only ADDS the Inter family + the AppColors /
+            // AppTypography theme extensions on top of the existing theme, so
+            // every current screen keeps its exact colours, radii and spacing.
+            theme: AppTheme.of(themeProvider.lightTheme),
+            darkTheme: AppTheme.of(themeProvider.darkTheme),
             themeMode:
                 themeProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
             debugShowCheckedModeBanner: false,

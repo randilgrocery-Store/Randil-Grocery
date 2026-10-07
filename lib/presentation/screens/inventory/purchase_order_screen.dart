@@ -211,7 +211,7 @@ class _PurchaseOrderScreenState extends State<PurchaseOrderScreen>
             ),
             title: Text(product.name),
             subtitle: Text(
-              'Stock: ${product.quantity}  |  Reorder level: $threshold  |  '
+              'Stock: ${fmtQty(product.quantity)}  |  Reorder level: $threshold  |  '
               'Cost: $symbol ${product.buyingPrice.toStringAsFixed(2)}',
             ),
             trailing: FilledButton.tonalIcon(
@@ -334,7 +334,7 @@ class _PurchaseOrderScreenState extends State<PurchaseOrderScreen>
                               Padding(
                                 padding: const EdgeInsets.symmetric(vertical: 2),
                                 child: Text(
-                                  '${item.quantity} x ${item.productName}  '
+                                  '${fmtQty(item.quantity)} x ${item.productName}  '
                                   '($symbol ${item.costPrice.toStringAsFixed(2)} ea)',
                                   style: const TextStyle(fontSize: 12),
                                 ),
@@ -407,7 +407,7 @@ class _PurchaseOrderScreenState extends State<PurchaseOrderScreen>
         await context.read<PurchaseOrderProvider>().receiveOrder(order);
         await context.read<ProductProvider>().loadProducts();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             const SnackBar(
               content: Text('Delivery received - stock updated'),
               backgroundColor: PosAppTheme.successGreen,
@@ -416,7 +416,7 @@ class _PurchaseOrderScreenState extends State<PurchaseOrderScreen>
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             SnackBar(content: Text('Failed to receive: $e')),
           );
         }
@@ -454,7 +454,7 @@ class _PurchaseOrderScreenState extends State<PurchaseOrderScreen>
     final products = context.read<ProductProvider>().allProducts;
     final suppliers = context.read<SupplierProvider>().suppliers;
     if (products.isEmpty || suppliers.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         const SnackBar(
           content: Text('Add products and suppliers before creating an order'),
         ),
@@ -624,7 +624,7 @@ class _NewPurchaseOrderDialogState extends State<NewPurchaseOrderDialog> {
                             children: [
                               Expanded(
                                 child: Text(
-                                  '${_items[i].quantity} x ${_items[i].productName}',
+                                  '${fmtQty(_items[i].quantity)} x ${_items[i].productName}',
                                   style: const TextStyle(fontSize: 13),
                                 ),
                               ),
@@ -708,7 +708,7 @@ class _NewPurchaseOrderDialogState extends State<NewPurchaseOrderDialog> {
       _snack('Select a product');
       return;
     }
-    final qty = int.tryParse(_qtyController.text);
+    final qty = double.tryParse(_qtyController.text);
     final cost = double.tryParse(_costController.text);
     if (qty == null || qty <= 0) {
       _snack('Enter a valid quantity');
@@ -747,7 +747,7 @@ class _NewPurchaseOrderDialogState extends State<NewPurchaseOrderDialog> {
           );
       if (mounted) {
         Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
+        showTopSnackBar(context, 
           const SnackBar(
             content: Text('Purchase order created'),
             backgroundColor: PosAppTheme.successGreen,
@@ -763,6 +763,6 @@ class _NewPurchaseOrderDialogState extends State<NewPurchaseOrderDialog> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    showTopSnackBar(context, SnackBar(content: Text(message)));
   }
 }

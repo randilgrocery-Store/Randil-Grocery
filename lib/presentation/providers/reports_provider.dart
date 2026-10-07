@@ -56,10 +56,10 @@ class ReportsProvider extends ChangeNotifier {
       _dbService.getSalesByDateRange(start, end);
 
   /// Get top selling products
-  List<MapEntry<String, int>> getTopSellingItems(int limit) {
+  List<MapEntry<String, double>> getTopSellingItems(int limit) {
     if (_monthlyReport == null) return [];
     final items = _monthlyReport!['bestSellingItems'] as List? ?? [];
-    return items.cast<MapEntry<String, int>>().take(limit).toList();
+    return items.cast<MapEntry<String, double>>().take(limit).toList();
   }
 
   /// Get daily revenue for chart
@@ -79,9 +79,9 @@ class ReportsProvider extends ChangeNotifier {
   }
 
   /// Get total items sold
-  int getTotalItemsSold(List<Sale> sales) => sales.fold(0, (sum, sale) {
+  double getTotalItemsSold(List<Sale> sales) => sales.fold(0.0, (sum, sale) {
         final itemCount =
-            sale.items.fold(0, (sum, item) => sum + item.quantity);
+            sale.items.fold(0.0, (sum, item) => sum + item.quantity);
         return sum + itemCount;
       });
 }

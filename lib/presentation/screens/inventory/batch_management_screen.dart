@@ -222,7 +222,7 @@ class _BatchManagementScreenState extends State<BatchManagementScreen> {
       await context.read<BatchProvider>().deleteBatch(batch.id);
       await context.read<ProductProvider>().loadProducts();
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        showTopSnackBar(context, 
           const SnackBar(content: Text('Batch deleted')),
         );
       }
@@ -266,7 +266,39 @@ class BatchListTile extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Quantity: ${batch.quantity} units @ ${context.read<SettingsProvider>().settings.currencySymbol} ${batch.price}',
+              'Quantity: ${fmtQty(batch.quantity)} units @ ${context.read<SettingsProvider>().settings.currencySymbol} ${batch.price}',
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: batch.initialQuantity > 0
+                          ? (batch.quantity / batch.initialQuantity)
+                              .clamp(0.0, 1.0)
+                          : 0,
+                      minHeight: 6,
+                      backgroundColor: Colors.grey.shade300,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        batch.quantity <= 0
+                            ? Colors.grey
+                            : (batch.quantity / (batch.initialQuantity <= 0 ? 1 : batch.initialQuantity)) > 0.25
+                                ? Colors.green
+                                : Colors.orange,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            Text(
+              'Bought: ${fmtQty(batch.initialQuantity)}   ·   '
+              'Used: ${fmtQty(batch.usedQuantity)}   ·   '
+              'Left: ${fmtQty(batch.quantity)}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
             ),
             Text(
               batch.expiryDate == null
@@ -503,7 +535,7 @@ class _BatchFormDialogState extends State<BatchFormDialog> {
 
   Future<void> _saveBatch(BuildContext context) async {
     if (_batchNumberController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         const SnackBar(content: Text('Please enter batch number')),
       );
       return;
@@ -512,10 +544,10 @@ class _BatchFormDialogState extends State<BatchFormDialog> {
     final price = double.tryParse(_priceController.text);
     final sellingPrice = double.tryParse(_sellingPriceController.text) ??
         widget.product.sellingPrice;
-    final quantity = int.tryParse(_quantityController.text);
+    final quantity = double.tryParse(_quantityController.text);
 
     if (price == null || quantity == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         const SnackBar(content: Text('Please enter valid price and quantity')),
       );
       return;
@@ -549,7 +581,7 @@ class _BatchFormDialogState extends State<BatchFormDialog> {
 
     if (mounted) {
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
+      showTopSnackBar(context, 
         SnackBar(
           content: Text(
             widget.batch != null ? 'Batch updated' : 'Batch created',

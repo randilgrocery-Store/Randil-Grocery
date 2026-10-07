@@ -130,7 +130,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                                     ),
                                     const SizedBox(height: 2),
                                     Text(
-                                      '${w.reason}  •  ${w.quantity} units'
+                                      '${w.reason}  •  ${fmtQty(w.quantity)} units'
                                       '${w.batchNumber.isNotEmpty ? '  •  Batch ${w.batchNumber}' : ''}'
                                       '  •  ${DateFormat('MMM dd, yyyy').format(w.wastageDate)}',
                                       style: const TextStyle(
@@ -238,7 +238,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                               .map((b) => DropdownMenuItem(
                                     value: b,
                                     child: Text(
-                                        '${b.batchNumber} (${b.quantity} left)'),
+                                        '${b.batchNumber} (${fmtQty(b.quantity)} left)'),
                                   ))
                               .toList(),
                           onChanged: (value) {
@@ -313,7 +313,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
           ElevatedButton(
             onPressed: () async {
               if (selectedProduct == null || qtyCtrl.text.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                showTopSnackBar(context, 
                   const SnackBar(
                     content: Text('Please select a product and enter quantity'),
                     backgroundColor: Colors.red,
@@ -321,9 +321,9 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                 );
                 return;
               }
-              final qty = int.tryParse(qtyCtrl.text.trim());
+              final qty = double.tryParse(qtyCtrl.text.trim());
               if (qty == null || qty <= 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                showTopSnackBar(context, 
                   const SnackBar(
                     content: Text('Please enter a valid quantity'),
                     backgroundColor: Colors.red,
@@ -334,7 +334,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
               final available =
                   selectedBatch?.quantity ?? selectedProduct!.quantity;
               if (qty > available) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                showTopSnackBar(context, 
                   SnackBar(
                     content: Text(
                         'Quantity exceeds available stock ($available units)'),
@@ -359,7 +359,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                 await context.read<ProductProvider>().loadProducts();
                 if (context.mounted) {
                   Navigator.pop(ctx);
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  showTopSnackBar(context, 
                     SnackBar(
                       content: Text(wastage == null
                           ? 'Product no longer exists · refresh the product list'
@@ -373,7 +373,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                 }
               } catch (e) {
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  showTopSnackBar(context, 
                     SnackBar(
                       content: Text('Error recording wastage: $e'),
                       backgroundColor: Colors.red,
@@ -399,7 +399,7 @@ class _SummaryRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final totalUnits = (report?['totalUnits'] as int?) ?? 0;
+    final totalUnits = (report?['totalUnits'] as num?) ?? 0;
     final totalLoss = (report?['totalLoss'] as num?)?.toDouble() ?? 0.0;
     final byReason = (report?['byReason'] as Map?) ?? const {};
     final topReason = byReason.isEmpty
@@ -414,7 +414,7 @@ class _SummaryRow extends StatelessWidget {
           child: _StatCard(
             icon: Icons.delete_sweep,
             label: "Today's Units Wasted",
-            value: '$totalUnits',
+            value: fmtQty(totalUnits),
             color: PosAppTheme.dangerRed,
           ),
         ),

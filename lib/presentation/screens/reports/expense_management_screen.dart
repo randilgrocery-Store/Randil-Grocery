@@ -266,7 +266,7 @@ class _ExpenseManagementScreenState extends State<ExpenseManagementScreen> {
             ElevatedButton(
               onPressed: () {
                 if (descCtrl.text.isEmpty || amountCtrl.text.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  showTopSnackBar(context, 
                     const SnackBar(
                       content: Text('Please fill description and amount'),
                       backgroundColor: Colors.red,
@@ -276,7 +276,7 @@ class _ExpenseManagementScreenState extends State<ExpenseManagementScreen> {
                 }
                 final amount = double.tryParse(amountCtrl.text);
                 if (amount == null || amount <= 0) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  showTopSnackBar(context, 
                     const SnackBar(
                       content: Text('Please enter a valid amount'),
                       backgroundColor: Colors.red,

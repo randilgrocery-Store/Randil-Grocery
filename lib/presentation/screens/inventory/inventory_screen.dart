@@ -350,7 +350,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
     String categoryName,
     ResponsiveSize responsive,
   ) {
-    final isLowStock = product.quantity > 0 && product.quantity < 10;
+    final isLowStock = product.quantity > 0 && product.quantity < (product.reorderLevel ?? 10);
     final isOutOfStock = product.quantity <= 0;
 
     return GestureDetector(
@@ -515,7 +515,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             Text(
-                              'Stock: ${product.quantity}',
+                              'Stock: ${fmtQty(product.quantity)}${product.soldByWeight ? ' kg' : ''}',
                               style: TextStyle(
                                 fontSize: responsive.bodySmall,
                                 color: isOutOfStock
@@ -616,8 +616,9 @@ class _InventoryScreenState extends State<InventoryScreen> {
       text: isEdit ? existingProduct.sellingPrice.toString() : '',
     );
     final quantityCtrl = TextEditingController(
-      text: isEdit ? existingProduct.quantity.toString() : '',
+      text: isEdit ? fmtQty(existingProduct.quantity) : '',
     );
+    bool soldByWeight = isEdit ? existingProduct.soldByWeight : false;
 
     showDialog(
       context: context,
@@ -765,7 +766,19 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   GroceryTextField(
                     label: 'Quantity *',
                     controller: quantityCtrl,
-                    keyboardType: TextInputType.number,
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                  ),
+                  const SizedBox(height: 8),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Sold by weight (per kg)'),
+                    subtitle: const Text(
+                      'For rice, dhal, vegetables... — quantity is typed in kg at the counter and prices are per kg',
+                      style: TextStyle(fontSize: 11),
+                    ),
+                    value: soldByWeight,
+                    onChanged: (v) => setState(() => soldByWeight = v),
                   ),
                 ],
               ),
@@ -790,7 +803,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                     buyingPriceText.isEmpty ||
                     sellingPriceText.isEmpty ||
                     quantityText.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  showTopSnackBar(context, 
                     const SnackBar(
                       content: Text('Please fill all required fields'),
                       backgroundColor: PosAppTheme.dangerRed,
@@ -802,10 +815,10 @@ class _InventoryScreenState extends State<InventoryScreen> {
                 try {
                   final buyingPrice = double.parse(buyingPriceText);
                   final sellingPrice = double.parse(sellingPriceText);
-                  final quantity = int.parse(quantityText);
+                  final quantity = double.parse(quantityText);
 
                   if (buyingPrice < 0 || sellingPrice < 0 || quantity < 0) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    showTopSnackBar(context, 
                       const SnackBar(
                         content: Text('Values cannot be negative'),
                         backgroundColor: PosAppTheme.dangerRed,
@@ -822,7 +835,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                         await productProvider.getProductByBarcode(barcode);
                     if (existingBarcode != null) {
                       if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                        showTopSnackBar(context, 
                           const SnackBar(
                             content: Text(
                                 'Barcode already exists. Use a unique barcode.'),
@@ -845,6 +858,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                         sellingPrice: sellingPrice,
                         quantity: quantity,
                         imagePath: selectedImagePath,
+                        soldByWeight: soldByWeight,
                       ),
                     );
                   } else {
@@ -856,13 +870,14 @@ class _InventoryScreenState extends State<InventoryScreen> {
                       sellingPrice: sellingPrice,
                       quantity: quantity,
                       imagePath: selectedImagePath,
+                      soldByWeight: soldByWeight,
                     );
                     await productProvider.addProduct(newProduct);
                   }
 
                   if (mounted) {
                     Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    showTopSnackBar(context, 
                       SnackBar(
                         content: Text(
                           isEdit
@@ -881,7 +896,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   }
                 } on FormatException catch (e) {
                   debugPrint('FormatException: $e');
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  showTopSnackBar(context, 
                     const SnackBar(
                       content: Text(
                           'Invalid number format: Please enter valid numbers for prices and quantity'),
@@ -912,7 +927,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   }
 
                   if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    showTopSnackBar(context, 
                       SnackBar(
                         content: Text(errorMessage),
                         backgroundColor: PosAppTheme.dangerRed,
@@ -968,7 +983,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                 const SizedBox(height: 8),
                 _buildDetailRow(
                   'Current Stock',
-                  '${product.quantity} units',
+                  '${fmtQty(product.quantity)} ${product.soldByWeight ? 'kg' : 'units'}',
                   color: product.quantity <= 0
                       ? PosAppTheme.dangerRed
                       : product.quantity < 10
@@ -1032,7 +1047,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
       try {
         await context.read<ProductProvider>().deleteProduct(productId);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             const SnackBar(
               content: Text('Product deleted successfully'),
               backgroundColor: PosAppTheme.successGreen,
@@ -1041,7 +1056,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             SnackBar(
               content: Text('Error deleting product: $e'),
               backgroundColor: PosAppTheme.dangerRed,
@@ -1232,7 +1247,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
           ElevatedButton(
             onPressed: () async {
               if (nameCtrl.text.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                showTopSnackBar(context, 
                   const SnackBar(
                     content: Text('Category name is required'),
                     backgroundColor: PosAppTheme.dangerRed,
@@ -1261,7 +1276,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
 
                 if (mounted) {
                   Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  showTopSnackBar(context, 
                     SnackBar(
                       content: Text(
                         isEdit
@@ -1278,7 +1293,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   }
                 }
               } catch (e) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                showTopSnackBar(context, 
                   SnackBar(
                     content: Text('Error: $e'),
                     backgroundColor: PosAppTheme.dangerRed,
@@ -1325,7 +1340,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
       try {
         await context.read<CategoryProvider>().deleteCategory(categoryId);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             const SnackBar(
               content: Text('Category deleted successfully'),
               backgroundColor: PosAppTheme.successGreen,
@@ -1339,7 +1354,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          showTopSnackBar(context, 
             SnackBar(
               content: Text('Error deleting category: $e'),
               backgroundColor: PosAppTheme.dangerRed,

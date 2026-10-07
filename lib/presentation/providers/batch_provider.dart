@@ -25,7 +25,7 @@ class BatchProvider extends ChangeNotifier {
     required String productId,
     required String batchNumber,
     required double price,
-    required int quantity,
+    required double quantity,
     required DateTime expiryDate,
     required String supplierId,
     double sellingPrice = 0,
@@ -60,7 +60,7 @@ class BatchProvider extends ChangeNotifier {
 
   Future<void> updateBatchQuantity(
     String batchId,
-    int newQuantity,
+    double newQuantity,
   ) async {
     final matches = _batches.where((b) => b.id == batchId);
     if (matches.isEmpty) {
@@ -75,14 +75,14 @@ class BatchProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> decrementBatchQuantity(String batchId, int amount) async {
+  Future<void> decrementBatchQuantity(String batchId, double amount) async {
     final matches = _batches.where((b) => b.id == batchId);
     if (matches.isEmpty) {
       return;
     }
     final batch = matches.first;
     final newQuantity =
-        (batch.quantity - amount).clamp(0, batch.quantity).toInt();
+        (batch.quantity - amount).clamp(0.0, batch.quantity).toDouble();
     await updateBatchQuantity(batchId, newQuantity);
   }
 

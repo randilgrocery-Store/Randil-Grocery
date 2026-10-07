@@ -12,6 +12,7 @@ import '../../data/models/goods_received_note.dart';
 import '../../data/models/product.dart';
 import '../../data/models/refund_return.dart';
 import '../../data/models/sale.dart';
+import '../../data/models/supplier_payment.dart';
 import '../config/cloud_config.dart';
 
 /// Publishes shop data to Supabase so the "Randil Grocery POS" mobile app can
@@ -34,6 +35,8 @@ class SupabaseSyncService {
   static const _kAnon = 'supabase_anon';
   static const _kEnabled = 'supabase_enabled';
   static const _kTokenBucket = 'supabase_last_sync';
+  static const _kLastAttempt = 'supabase_last_attempt';
+  static const _kLastError = 'supabase_last_error';
 
   final DatabaseService _db = DatabaseService();
 
@@ -163,16 +166,26 @@ class SupabaseSyncService {
     _syncing = true;
     _lastError = null;
     try {
+      // Diagnostics that survive restarts, so a failed sync can be inspected
+      // from the prefs file even when nobody is looking at the Settings UI.
+      final attemptPrefs = await SharedPreferences.getInstance();
+      await attemptPrefs
+          .setString(_kLastAttempt, DateTime.now().toIso8601String());
       final since = full ? null : _lastSync;
       await _pushProducts(since: since, pushAllCustomers: full);
       await _pushRefunds(since: since);
       await _pushGrns(since: since);
       await _pushExpenses(since: since);
+      await _pushSupplierPayments(since: since);
       await _pushSales(since: since);
       await _pushDailyRoutines();
       await _setLastSync();
+      final okPrefs = await SharedPreferences.getInstance();
+      await okPrefs.remove(_kLastError);
     } catch (e) {
       _lastError = e.toString();
+      final errPrefs = await SharedPreferences.getInstance();
+      await errPrefs.setString(_kLastError, _lastError!);
       debugPrint('Supabase syncAll failed: $e');
     } finally {
       _syncing = false;
@@ -193,9 +206,15 @@ class SupabaseSyncService {
 
   Future<void> _pushDailyRoutines() async {
     final now = DateTime.now();
-    final today = _buildDayRoutine(now);
-    final yesterday = _buildDayRoutine(now.subtract(const Duration(days: 1)));
-    await _pushRows('daily_routines', [await today, await yesterday]);
+    // Push the last 7 days (not only today/yesterday) so the phone's 7-day
+    // trend and week totals are complete even after days the POS was not
+    // running. Rows upsert on (shop_id, date), so re-pushing is idempotent
+    // and each empty day costs one tiny zero row.
+    final rows = <Map<String, dynamic>>[];
+    for (var i = 6; i >= 0; i--) {
+      rows.add(await _buildDayRoutine(now.subtract(Duration(days: i))));
+    }
+    await _pushRows('daily_routines', rows);
   }
 
   Future<Map<String, dynamic>> _buildDayRoutine(DateTime day) async {
@@ -311,7 +330,7 @@ class SupabaseSyncService {
         'price': p.sellingPrice,
         'cost': p.buyingPrice,
         'stock': p.quantity,
-        'unit': '',
+        'unit': p.soldByWeight ? 'kg' : '',
         'low_stock_threshold': p.reorderLevel ?? 0,
         'updated_at': p.updatedAt.toUtc().toIso8601String(),
       };
@@ -321,7 +340,7 @@ class SupabaseSyncService {
         'name': c.name,
         'phone': c.phone,
         'email': c.email,
-        'loyalty_points': c.loyaltyPoints,
+        'loyalty_points': 0,
         'total_spend': c.totalSpent,
         'visits': c.totalTransactions,
         'updated_at': DateTime.now().toUtc().toIso8601String(),
@@ -332,7 +351,7 @@ class SupabaseSyncService {
         'grn_number': g.grnNumber,
         'supplier_name': g.supplierName,
         'amount': g.total,
-        'items_count': g.totalItems,
+        'items_count': g.totalItems.round(),
         'items_json': jsonEncode([
           for (final i in g.items)
             {'name': i.productName, 'qty': i.quantity, 'cost': i.costPrice}
@@ -426,17 +445,45 @@ class SupabaseSyncService {
         'expenses_sync', rows.map(_expenseRow).toList(growable: false));
   }
 
+  Future<void> _pushSupplierPayments({DateTime? since}) async {
+    final payments = await _db.getAllSupplierPayments();
+    final rows = since == null
+        ? payments
+        : payments.where((p) => p.paymentDate.isAfter(since));
+    await _pushRows('supplier_payments_sync',
+        rows.map(_supplierPaymentRow).toList(growable: false));
+  }
+
+  Map<String, dynamic> _supplierPaymentRow(SupplierPayment p) => {
+        'id': p.id,
+        'supplier_name': p.supplierName,
+        'amount': p.amount,
+        'method': p.method,
+        'cheque_number': p.chequeNumber,
+        'bank_name': p.bankName,
+        'note': p.note,
+        'timestamp': p.paymentDate.toUtc().toIso8601String(),
+      };
+
   Future<void> _pushRows(String table, Iterable<Map<String, dynamic>> rows) async {
     final list = rows.toList(growable: false);
     if (list.isEmpty) return;
     final client = _client;
     if (client == null) return;
-    await client.post(
-      '/rest/v1/$table',
-      data: list,
-      options: Options(
-        headers: const {'Prefer': 'resolution=merge-duplicates'},
-      ),
-    );
+    try {
+      await client.post(
+        '/rest/v1/$table',
+        data: list,
+        options: Options(
+          headers: const {'Prefer': 'resolution=merge-duplicates'},
+        ),
+      );
+    } on DioException catch (e) {
+      final detail = e.response == null
+          ? 'Supabase $table push failed: $e'
+          : 'Supabase $table push failed: HTTP ${e.response?.statusCode}: '
+              '${e.response?.data}';
+      throw StateError(detail);
+    }
   }
 }

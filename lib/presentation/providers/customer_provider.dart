@@ -101,53 +101,18 @@ class CustomerProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> adjustCustomerCredit(
-    String customerId,
-    double amount, {
-    bool add = true,
-  }) async {
-    try {
-      await _dbService.adjustCustomerCredit(customerId, amount, add: add);
-      await loadCustomers();
-    } catch (e) {
-      debugPrint('Error adjusting customer credit: $e');
-      rethrow;
-    }
-  }
-
-  Future<void> adjustCustomerLoyaltyPoints(
-    String customerId,
-    int points,
-  ) async {
-    try {
-      await _dbService.adjustCustomerLoyaltyPoints(customerId, points);
-      await loadCustomers();
-    } catch (e) {
-      debugPrint('Error adjusting loyalty points: $e');
-      rethrow;
-    }
-  }
-
-  Future<void> updateCustomerCreditAndLoyalty({
+  Future<void> updateCustomerPurchaseStats({
     required String customerId,
     required double amountSpent,
-    required double amountReceived,
-    required double creditApplied,
-    required int redeemedPoints,
-    required int pointsEarned,
   }) async {
     try {
-      await _dbService.updateCustomerCreditAndLoyalty(
+      await _dbService.updateCustomerPurchaseStats(
         customerId: customerId,
         amountSpent: amountSpent,
-        amountReceived: amountReceived,
-        creditApplied: creditApplied,
-        redeemedPoints: redeemedPoints,
-        pointsEarned: pointsEarned,
       );
       await loadCustomers();
     } catch (e) {
-      debugPrint('Error updating customer credit and loyalty: $e');
+      debugPrint('Error updating customer stats: $e');
       rethrow;
     }
   }

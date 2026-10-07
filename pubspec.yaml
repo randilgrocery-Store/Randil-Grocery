@@ -14,10 +14,10 @@ dependencies:
 
   # Charts for Reports
   fl_chart: ^0.65.0
-  
-  # UI & Animations
-  google_fonts: ^6.1.0
-  
+
+  # NOTE: google_fonts has been removed. Inter is bundled as an asset (see the
+  # `fonts:` block below) so LAN / offline terminals need no runtime download.
+
   # Date & Time
   intl: ^0.19.0
   
@@ -85,3 +85,18 @@ flutter:
   # Assets
   assets:
     - assets/images/
+
+  # Typography — Inter bundled as an asset so LAN / offline terminals render
+  # exactly the same as the online dev machine (no runtime font download).
+  # All four weights carry the OpenType `tnum` feature for tabular figures.
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Inter-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Inter-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Inter-Bold.ttf
+          weight: 700

@@ -223,7 +223,16 @@ class WindowsPrinterService {
 
   /// Send raw ESC/POS bytes to the given printer name.
   /// Returns true on success.
-  bool printRaw(String printerName, Uint8List data) {
+  ///
+  /// With [ignorePrinterStatus] set, the queue is accepted even when the
+  /// printer currently reports a problem (out of paper, offline, ...). Used by
+  /// the cash-drawer pulse: a paid sale must still pop the till even if the
+  /// paper roll ran out.
+  bool printRaw(
+    String printerName,
+    Uint8List data, {
+    bool ignorePrinterStatus = false,
+  }) {
     _lastError = null;
     if (data.isEmpty) {
       _lastError = 'No data to print';
@@ -232,10 +241,12 @@ class WindowsPrinterService {
 
     // Refuse to queue a job when the printer already reports a problem, so a
     // bill is never silently swallowed while the roll is empty/offline.
-    final problem = checkPrinter(printerName);
-    if (problem != null) {
-      _lastError = problem;
-      return false;
+    if (!ignorePrinterStatus) {
+      final problem = checkPrinter(printerName);
+      if (problem != null) {
+        _lastError = problem;
+        return false;
+      }
     }
 
     final printerNamePtr = printerName.toNativeUtf16();

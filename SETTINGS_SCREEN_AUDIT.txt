@@ -1,0 +1,541 @@
+================================================================================
+SETTINGS SCREEN — DESIGN & CONTENT AUDIT
+Randil Grocery POS (Flutter Desktop / Windows)
+================================================================================
+Audited file : lib\presentation\screens\settings\settings_screen.dart (2055 lines)
+Date         : 2026-10-06
+Scope        : AUDIT ONLY. No code in this file was modified by this audit.
+Companion to : DASHBOARD_REDESIGN_AUDIT_NOTES.txt
+
+This audit records (a) exactly what the Settings area contains, (b) how it is
+designed today, (c) what is wrong, and (d) what the redesign should do.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. FILE / SOURCE MAP
+--------------------------------------------------------------------------------
+
+  lib\presentation\screens\settings\settings_screen.dart   2055 lines  the UI
+  lib\presentation\providers\settings_provider.dart          89 lines  state
+  lib\data\models\shop_settings.dart                        130 lines  model
+  lib\data\services\backup_service.dart                               backup
+  lib\data\services\print_service.dart                                 printer
+  lib\data\services\supabase_sync_service.dart                         cloud
+  lib\core\utils\secure_storage.dart                                   token crypto
+  lib\presentation\providers\network_provider.dart                     LAN/server
+  lib\presentation\providers\auth_provider.dart                        users
+  lib\presentation\screens\backup\backup_management_screen.dart        pushed to
+
+Class : SettingsScreen (StatefulWidget) -> _SettingsScreenState
+State : 13 TextEditingController, 2 bool flags, 1 printer list, 1 busy flag
+Mounted under HomeScreen index 12 ('Settings').
+
+
+--------------------------------------------------------------------------------
+2. SHELL STRUCTURE
+--------------------------------------------------------------------------------
+
+  build()
+   +-- Padding(all: 16)
+       +-- _buildHeader()        green gradient hero banner
+       +-- _buildTabBar()        white pill container holding a 5-tab TabBar
+       +-- Expanded(TabBarView)
+            0 _buildShopSettings()
+            1 _buildUserManagement()
+            2 _buildBackupSettings()
+            3 _buildCloudSettings()
+            4 _buildAbout()
+
+  DefaultTabController(length: 5)
+
+  TAB LABELS / ICONS
+    0  Shop     Icons.store
+    1  Users    Icons.people_alt
+    2  Backup   Icons.backup
+    3  Cloud    Icons.cloud
+    4  About    Icons.info_outline
+
+  Header text:  "System Settings"
+  Header sub:   "Configure business profile, users, backups, and system details."
+
+
+--------------------------------------------------------------------------------
+3. TAB-BY-TAB CONTENT INVENTORY
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+TAB 1 — "Shop"   (_buildShopSettings, lines 926-1069)
+--------------------------------------------------------------------------------
+Section banner: "Business Configuration" / "Store profile and bill-print
+                 behavior"  (gradient 0xFF11998E -> 0xFF38EF7D)
+
+Status chip  : Printer = 'Connected' | 'Off'  (from settings.enablePrinting)
+
+CARD "Shop Details" (lines 953-990)          Save = "Save Changes" button
+  * Shop Name        text     settings.shopName          default 'Randil Grocery'
+  * Address          text x2  settings.address
+  * Phone            phone    settings.phone
+  * Email            email    settings.email
+
+CARD "Billing & Printer" (lines 992-1023)
+  * Enable Printer   toggle   -> SettingsProvider.updatePrinterSettings()
+  * [only when on] Printer selector (_buildPrinterSelector, lines 382-483)
+        - Dropdown of PrintService().listPrinters()
+        - Refresh IconButton (re-scans)
+        - "No printers detected..." error text when the list is empty
+        - Test Print button -> PrintService().printPlainText()
+
+CARD "Multi-PC & Live Sync" (_buildNetworkSettings, lines 485-745)
+  * "This PC is the server (admin)"  toggle -> _saveNetworkMode
+      WHEN server ON :
+          - status box: NetworkProvider.serverRunning, serverStatus,
+            serverLocalAddress
+          - Server Port       number, default 8180
+          - "Restart Server with Settings" button
+      WHEN server OFF :
+          - "Auto-detect the server" toggle -> updateNetworkSettings(
+            useAutoDiscovery) then NetworkProvider.applySettings()
+          - Server IP (fallback)   text, e.g. 192.168.1.10
+          - status card : NetworkProvider.statusLabel, serverUrl,
+            lastSyncAt, pendingCount ("N sale(s) waiting to sync"), lastError
+          - "Find Server Now" (reconnectNow) | "Apply"
+
+BUTTON ROW : Reset (re-runs _initializeControllers) | Save Changes
+              -> updateSettings(copyWith(shopName,address,phone,email))
+
+
+--------------------------------------------------------------------------------
+TAB 2 — "Users"   (_buildUserManagement, lines 1071-1283)
+--------------------------------------------------------------------------------
+Section banner: "User Access Control" / "Manage cashier/admin roles and account
+                 access"  (gradient 0xFF4568DC -> 0xFFB06AB3)
+
+Data source  : FutureBuilder on AuthProvider.getAllUsers() -> List<dynamic>
+
+Status chips : Total Users | Admins | Staff
+               (admins counted by `u.role.toString().toLowerCase().contains(
+                 'admin')` — string matching on an enum)
+
+Action row   : "Manage system users and access roles"
+               + [Add User] button — VISIBLE ONLY IF authProvider.isAdmin
+
+User list    : ListView.builder, one card per user
+               - CircleAvatar (orange = admin, green = other)
+               - fullName
+               - @username
+               - role badge (ADMIN / CASHIER, pill)
+               - "INACTIVE" label when !user.isActive
+               - PopupMenuButton (admin only): Edit | Deactivate/Activate | Delete
+
+DIALOG Add User  (_showAddUserDialog, 1285-1411)
+   username, full name, password (min 6), confirm password
+   hint card: "New users are created as Cashier."
+   validation: empty username / password < 6 / mismatch
+   -> AuthProvider.createUser(role: UserRole.cashier)
+
+DIALOG Edit User  (_showEditUserDialog, 1413-1511)
+   username, full name, new password (blank = keep)
+   hint card: "Role: X (roles cannot be changed)"
+   -> AuthProvider.updateUser()
+
+DIALOG Delete User (_confirmDeleteUser, 1513-1544)
+   AlertDialog, red Delete button -> AuthProvider.deleteUser()
+   failure text: "Cannot delete the last remaining admin"
+
+
+--------------------------------------------------------------------------------
+TAB 3 — "Backup"   (_buildBackupSettings, lines 1546-1832)
+--------------------------------------------------------------------------------
+Section banner: "Backup Configuration" / "Every transaction is snapshotted
+                 locally at once, then pushed to GitHub and Google Drive
+                 automatically"  (gradient 0xFF159957 -> 0xFF155799)
+
+Status chips : Cloud Upload = Enabled|Disabled ; Local Path = Default|Custom
+
+CARD "Storage and Cloud Settings"
+   - "Current target: <path>"   (effectivePath = backupLocalPath or
+     BackupService.preferredWindowsBackupPath)
+   * Local Backup Folder   text      [Choose Folder] [Use Default]
+   * Enable Google Drive Backup  toggle
+       WHEN on :
+         * Google Drive Access Token   obscured, maxLines 2
+             hint shows "A token is saved securely. Leave blank to keep it."
+             when SecureStorageService().isEncrypted(token)
+         * Google Drive Folder ID      + "Use this folder" link
+             + helper text naming BackupService.defaultGoogleDriveFolderId
+         * Admin Email                 email
+   * GitHub Backup Folder    text (folder holding the repo clone)
+   * GitHub Token            obscured, hint "saved encrypted"
+   [Reset] [Save Backup Settings]
+
+ACTION ROW
+   [Create Backup Now]  -> backupNowDetailed() + pushSnapshotToGithub()
+   [Open Backup Manager] -> pushes BackupManagementScreen
+   [Restore from .db backup] -> close db, delete -wal/-shm, copy file
+
+SECRET HANDLING (correctly done)
+   - Encrypted tokens are NEVER put back into the text fields.
+   - Blank token field on Save preserves the stored token.
+
+
+--------------------------------------------------------------------------------
+TAB 4 — "Cloud"   (_buildCloudSettings, lines 778-889)
+--------------------------------------------------------------------------------
+Section banner: "Cloud Sync" / "Push sales, stock, customers, refunds, GRNs and
+                 expenses to the phone app"  (gradient 0xFF0F2027 -> 0xFF203A43)
+
+CARD
+   * Enable cloud sync   switch -> local _enableCloudSync (NOT saved until button)
+   * Supabase URL        text, hint https://xxxx.supabase.co
+   * Supabase Anon Key   text, obscure, hint eyJhbGciOi...
+   * status line         error | lastSync | "Sync has not run yet" |
+                         "Cloud sync is off" | "Syncing now..."
+   [Save & Sync Now]     -> SupabaseSyncService.configure() (disabled while busy)
+   + a 6-line block of SETUP INSTRUCTIONS shown in the card:
+       "1. Create a free project at supabase.com
+        2. Open SQL Editor and run the script in the repo folder
+           docs / supabase_schema.sql (adds the daily_routines table)
+        3. Save & Sync Now - that is all.
+        To keep the free tier small, background sync every 15 minutes only
+        sends NEW records plus a 1-row daily routine summary..."
+
+
+--------------------------------------------------------------------------------
+TAB 5 — "About"   (_buildAbout, lines 1835-1886)
+--------------------------------------------------------------------------------
+Section banner: "About RandilPOS" / "System details and who to contact for
+                 support or updates."  (gradient 0xFF4568DC -> 0xFF5B86E5)
+
+CARD — 6 _AboutRow entries, ALL HARD-CODED:
+   System          RandilPOS Grocery Point of Sale
+   Version         1.0.0
+   Developed by    Jerusha Sharon
+   Support phone   070-30 27 611
+   Support email   jerushasharon1999@gmail.com
+   Support         "Contact your system provider for help, updates
+                    and new feature requests."
+
+
+--------------------------------------------------------------------------------
+4. SHOPSETTINGS — EVERY FIELD THE MODEL HOLDS, AND WHETHER THE UI EDITS IT
+--------------------------------------------------------------------------------
+
+  FIELD                    DEFAULT          IN THE UI?
+  ------------------------- ---------------- ------------------------------
+  shopName                  'Randil Grocery' YES  Shop tab
+  address                   ''               YES  Shop tab
+  phone                     ''               YES  Shop tab
+  email                     ''               YES  Shop tab
+  currency                  'LKR'            NO  <-- never editable
+  currencySymbol            'Rs.'            NO  <-- never editable
+  printerName               'Default Printer'YES  Shop tab (dropdown)
+  enablePrinting            false            YES  Shop tab (toggle)
+  paperWidth (mm)           80               NO  <-- never editable
+  backupLocalPath           ''               YES  Backup tab
+  enableGoogleDriveBackup   false            YES  Backup tab
+  googleDriveAccessToken    ''               YES  Backup tab (obscured)
+  googleDriveFolderId       ''               YES  Backup tab
+  googleDriveAdminEmail     ''               YES  Backup tab
+  isServerMode              false            YES  Shop tab (network card)
+  networkPort               8180             YES  Shop tab (network card)
+  serverIpFallback          ''               YES  Shop tab (network card)
+  useAutoDiscovery          true             YES  Shop tab (network card)
+  updatedAt                 now              derived, not editable
+
+  >> GAP: `currency`, `currencySymbol` and `paperWidth` exist in the model, are
+     written to the DB, and are read by printing, GRN, PO, Reports, Supplier and
+     Refund screens — but there is NO way to change them anywhere in Settings.
+     `currencySymbol` defaults to 'Rs.' and is the string the redesign's
+     AppMoney formatter is derived from.
+
+  Not present in ShopSettings but held elsewhere:
+    _githubSyncPath / _githubToken          -> BackupService
+    supabase url / anonKey / enabled        -> SupabaseSyncService.instance
+
+
+--------------------------------------------------------------------------------
+5. DESIGN AUDIT — WHAT BREAKS THE APPROVED DESIGN RULES
+--------------------------------------------------------------------------------
+
+[1] HERO BANNER — VIOLATION
+    _buildHeader (301-342) is a full-width green gradient banner with a coloured
+    glow shadow, exactly the "giant hero banner" the brief says to remove.
+    Replace with a slim greeting/section row.
+
+[2] RANDOM GRADIENTS — VIOLATION (7 of them)
+    Header            0xFF00843D -> 0x006830 + 25% green glow
+    Shop banner       0xFF11998E -> 0xFF38EF7D   teal->lime
+    Users banner      0xFF4568DC -> 0xFFB06AB3   blue->purple
+    Backup banner     0xFF159957 -> 0xFF155799   green->blue
+    Cloud banner      0xFF0F2027 -> 0xFF203A43   navy->slate
+    About banner      0xFF4568DC -> 0xFF5B86E5   two blues
+    TabBar indicator  plain tinted box (this one is fine)
+    The brief: "Semantic colors only for meaning... No random gradients."
+    Every one of these is decorative, not semantic. All six should go.
+
+[3] ONE CARD STYLE — VIOLATION (radius drift)
+    borderRadius values in this file: 16, 14, 12, 10, 8, pill(999).
+    Containers using plain Container + Border.all:
+        1125 (user list header), 1325 (dialog hint), 1447 (dialog hint),
+        1622 (Wrap), 1950 (_buildKpiChip), 1999 (_buildSettingToggleTile)
+    These bypass Card/GroceryCard entirely, so even the legacy card style is
+    not consistently applied here.
+
+[4] DARK MODE — BROKEN (this is the biggest practical defect)
+    Hard-coded `Colors.white` backgrounds, 10 occurrences:
+        348  _buildTabBar container
+        1129 user list header
+        1168 user row background
+        1953 _buildKpiChip
+        + GrocryCard `color: Colors.white` at 1166
+    Hard-coded PosAppTheme static colours bypass Theme entirely:
+        bg, textDark, textGray, borderGray, primaryGreen, dangerRed,
+        warningOrange, successGreen, accentBlue, lightGreen, darkGreen
+    Result: on dark mode this screen renders WHITE panels on a #121212 canvas,
+    with white-on-white text in places. Also `_buildSettingToggleTile` uses
+    `color: PosAppTheme.bgColor` (#F4F7F6, light) as its container.
+    The screen has never been tested in dark mode.
+
+[5] NO TYPE SCALE
+    Font sizes present: 24, 18, 17, 16, 14, 13, 12, 11, 10.
+    No weight/size relationship. Every title is hand-styled with an inline
+    TextStyle instead of a scale.
+
+[6] PRIVATE ONE-OFF WIDGETS THAT SHOULD BE THE COMPONENT LIBRARY
+    _buildKpiChip        (1944-1990)  -> should be KpiCard / StatusBadge
+    _buildSettingToggleTile (1992-2013) -> needs a shared SwitchTile component
+    _buildSectionBanner  (1888-1942)  -> should be a plain SectionHeader
+    _AboutRow            (2017-2055)  -> fine, but hand-styled
+    _buildHeader         (301-342)    -> remove per brief
+    These duplicate the component library instead of using it.
+
+[7] NO HOVER / FOCUS AFFORDANCE
+    The whole screen is static Boxes. Nothing responds to the mouse. On a
+    desktop POS where most interaction is a mouse click this is a real gap.
+
+
+--------------------------------------------------------------------------------
+6. THE FOUR-STATE RULE — WHERE SETTINGS FAILS IT
+--------------------------------------------------------------------------------
+
+  WIDGET              LOADING            EMPTY         ERROR       DATA
+  -------------------- ------------------ ------------- ----------- ----------
+  Users list           CircularProgressIndicator  MISSING   MISSING     yes
+  Printer list         none (sync call)   partial text  partial     yes
+  Network status       none               N/A           yes (red)   yes
+  Cloud status         none               "Cloud off"   yes (red)   yes
+  Backup target path   none               default path  none        yes
+
+  >>> Users tab (1074-1077):
+        if (!snapshot.hasData) return Center(child: CircularProgressIndicator());
+      - NO empty state: a brand-new shop with zero users shows a bare spinner
+        forever (FutureBuilder only resolves hasData when the future completes,
+        and even then an EMPTY LIST produces `users.length == 0` -> a header
+        chip reading "0" and a completely blank list area).
+      - NO error state: if getAllUsers() throws, snapshot.hasData stays false
+        -> the spinner never stops and there is no message and no retry.
+      - NO retry affordance.
+
+  >>> This screen is the clearest 4-state violation in the whole app and should
+      be the first consumer of AppAsync / SkeletonList / AppEmptyState /
+      AppErrorState from the component library built in Step 2.
+
+
+--------------------------------------------------------------------------------
+7. ROLE & PERMISSION BEHAVIOUR
+--------------------------------------------------------------------------------
+
+  * Settings is admin nav INDEX 12 of 13. Cashier nav is only 5 entries
+    (Dashboard, POS, GRN, Refunds, Profile) — cashiers CANNOT reach Settings
+    at all. Verified in home_screen.dart lines 50-96.
+
+  * Inside the screen, user management is additionally gated by
+    authProvider.isAdmin:
+        - "Add User" button hidden          (1146)
+        - per-user PopupMenu hidden         (1240)
+    The user LIST itself is not gated, but the tab is unreachable to a cashier.
+
+  * Role assignment: only UserRole.cashier is ever created. The Edit dialog
+    states roles cannot be changed. There is no UI to promote a user to admin;
+    that must be done out-of-band (DB or seed).
+
+  * No wording anywhere in Settings uses "credit", "unpaid customer" or
+    "debt". Only external money owed in the app is We Owe Suppliers, which is
+    NOT on this screen. This rule is already satisfied here — do not break it.
+
+
+--------------------------------------------------------------------------------
+8. BUGS / SMELLS FOUND (line numbers)
+--------------------------------------------------------------------------------
+
+  B1. Users tab swallows errors and can hang on the spinner.
+      Line 1074-1076. See section 6.
+
+  B2. "Reset" on the Shop tab (1031) calls _initializeControllers() only.
+      It re-reads settings into the text fields. It does NOT undo anything
+      already saved, and it does not clear the notice, so a user who edits ->
+      saves -> clicks Reset sees the saved values "restored" and may believe
+      Reset reverted them. Misleading label; it should be "Discard changes".
+
+  B3. Cloud sync switch (811-813) writes to LOCAL STATE only.
+      `_enableCloudSync` is not persisted until "Save & Sync Now" is pressed.
+      There is no "Save" that persists without also triggering a network push.
+      A user can toggle it, close the tab, and nothing changed — with no
+      indication of the pending state.
+
+  B4. Reset does not touch the cloud tab fields (URL / anon key) or the
+      network fields partially: _initializeControllers DOES rebuild the network
+      controllers from settings, but the cloud controllers are rebuilt from
+      SupabaseSyncService.instance, so behavior is inconsistent between tabs.
+
+  B5. Admin detection via string matching.
+      Line 1081: `u.role.toString().toLowerCase().contains('admin')`.
+      Fragile against enum renaming. Compare against the enum value instead.
+
+  B6. Admin rows tinted with warningOrange (1167, 1173, 1211).
+      Semantically wrong: an admin is not a warning. Uses a semantic colour
+      for decoration — violates the "semantic colours only for meaning" rule.
+
+  B7. Duplicate-ish user cards are not keyboard navigable and have no
+      hover state; the overflow menu is the only affordance.
+
+  B8. `_loadPrinters` (96-106) silently swallows every exception with
+      `catch (_)`. A printer enumeration failure is indistinguishable from
+      "no printers installed".
+
+  B9. Restore confirm (194-213) uses a plain AlertDialog where Cancel and
+      Continue are BOTH TextButtons. The destructive path ("replace all
+      current data") has no visual weight and no icon. Should use
+      AppConfirmDialog(destructive: true).
+
+  B10. About tab hardcodes Version '1.0.0' while pubspec.yaml is
+      version: 1.0.0+1. It will silently drift on every bump.
+
+  B11. `withOpacity` used 18 times (deprecated in Flutter 3.44) — including
+      lines 310, 317, 362, 503, 549, 812, 1167, 1173, 1211, 1676, 1910, 1932,
+      1964. Use withValues(alpha:). Same deprecation the new component
+      library already avoided.
+
+  B12. Developers' setup instructions for Supabase (871-881) are shown to the
+      end user, including file paths in the repo. That is developer content in
+      a production screen.
+
+  B13. Five text controllers are created but never disposed if
+       _initializeControllers is called again from "Reset": _initializeControllers
+       reassigns them WITHOUT disposing the old instances -> LEAK.
+       Lines 56-94 and 1031. This is the most concrete resource bug in the file.
+
+  B14. Network settings (a system/infrastructure concern) live inside the
+       "Shop" tab which is labelled as business profile. Users look for LAN
+       setup under "Cloud" and will not find it.
+
+
+--------------------------------------------------------------------------------
+9. MISSING DATA SOURCES (Settings-specific)
+--------------------------------------------------------------------------------
+
+  M1. currency / currencySymbol — persisted and consumed, NOT editable.
+      The redesign needs a currency setting ONLY if the user wants it exposed.
+      Until then AppMoney falls back to 'Rs', which matches the model default
+      exactly, so no display bug results from leaving it unexposed.
+
+  M2. paperWidth (receipt width, 80mm) — persisted, used by PrintService,
+      NOT editable. Selecting a 58mm printer from the dropdown will not change
+      the paper width.
+
+  M3. Printer "Connected" chip (941-948) is derived from enablePrinting only.
+      It says 'Connected' when printing is merely ENABLEED. The printer may be
+      missing/unplugged. The label is misleading — it means "Printing on".
+
+  M4. No place to view app version, DB path, or DB size except a hardcoded
+      About row. `DatabaseService().getDatabasePath()` exists and is already
+      called in this file (142), so a real value is available.
+
+  M5. No "server running" health detail in the top-level sense — it exists only
+      inside the nested network card, and only when isServerMode is true.
+
+  M6. No audit trail / last-changed stamp, even though ShopSettings.updatedAt
+      is stored. Displaying "Settings last updated <updatedAt>" is free.
+
+
+--------------------------------------------------------------------------------
+10. NOT SUPPORTED BY THE DATA LAYER (do not build)
+--------------------------------------------------------------------------------
+
+  * No customer credit / debt / balance fields anywhere. Customer model has
+    none. Settings must never grow such UI.
+  * No per-user permissions matrix — only the boolean admin role.
+  * No company/tax configuration in ShopSettings (tax settings live in
+    Reports/POS settings elsewhere).
+  * No notification/alert configuration section.
+  * No auto-update mechanism (the About "update" wording is informational).
+
+
+--------------------------------------------------------------------------------
+11. RECOMMENDED REDESIGN DIRECTION (for later approval — NOT implemented)
+--------------------------------------------------------------------------------
+
+  A. Remove the gradient hero header. Use the slim page header that the new
+     shell already provides, plus the standard title.
+
+  B. Drop the six decorative section banners. Replace each with
+     AppSectionHeader(icon, title, subtitle).
+
+  C. Keep the 5 tabs — they are a good information architecture. Consider
+     renaming to:
+        Shop · Users · Backup · Cloud · About
+     (labels are already good; no need to change)
+
+  D. Move the network/LAN card out of the Shop tab into Cloud, or into a new
+     6th "Network" tab. Strongly recommended: it is the single largest
+     IA problem in this screen (B14).
+
+  E. Replace every hardcoded white with AppColors.surface; replace every
+     PosAppTheme.* with context.appColors so dark mode works.
+
+  F. Replace _buildKpiChip with KpiCard or StatusBadge; replace
+     _buildSettingToggleTile with a shared themed switch tile; replace
+     _buildSectionBanner with AppSectionHeader.
+
+  G. Make the Users tab the reference implementation of the four states:
+        loading  -> SkeletonList(rows: 5)
+        empty    -> AppEmptyState(icon: person_off, "No users yet",
+                                  action: Add User if admin)
+        error    -> AppErrorState(onRetry: reload future)
+        data     -> AppDataTable or the existing list
+
+  H. Reuse AppConfirmDialog(destructive: true) for delete-user and restore.
+
+  I. Surface paperWidth and (optionally) currency/currencySymbol — they are
+     already persisted, so this is UI-only.
+
+  J. Show a real version string instead of the hardcoded '1.0.0', and a real
+     DB path/size from DatabaseService().
+
+  K. Label the printer chip "Printing on" / "Printing off", not Connected.
+
+  L. Fix the controller leak (B13) before touching anything else.
+
+
+--------------------------------------------------------------------------------
+12. SUMMARY SCORECARD
+--------------------------------------------------------------------------------
+
+  Information architecture     6/10  good tabs, but LAN buried inside Shop
+  Visual design                3/10  7 gradients, 6 radii, 8 type sizes
+  Dark mode                    1/10  effectively broken (hardcoded whites)
+  Four-state coverage          2/10  only Users tab is a real user list
+  Accessibility                3/10  no hover, no focus, no keyboard list nav
+  Secrets handling             9/10  correct: tokens never re-exposed
+  Role gating                  8/10  admin-only screen + admin-only actions
+  Business-logic safety        8/10  no credit/debt wording, no schema changes
+  Code health                  5/10  1500+ lines in one State class, 1 leak
+
+  Verdict: content and IA are largely sound and should be REUSED as-is.
+           The styling must be replaced wholesale. The Users tab is the one
+           place where correctness (states) must be fixed, not just styling.
+
+================================================================================
+END OF AUDIT — no settings code was changed
+================================================================================

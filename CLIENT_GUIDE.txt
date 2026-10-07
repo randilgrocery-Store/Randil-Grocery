@@ -1,0 +1,187 @@
+=================================================================
+        RANDIL GROCERY POS  -  SYSTEM GUIDE FOR THE CLIENT
+=================================================================
+
+Welcome! This document explains your new shop management system in
+simple language. It was built specially for Randil Grocery and runs
+on your own computers - no monthly fees, no internet needed to run
+the shop.
+
+Prepared by:  Jerusha Tech Solutions
+              Phone : 070 3027 611
+              Email : jerushasharon1999@gmail.com
+
+-----------------------------------------------------------------
+1. WHAT YOU GOT  (the two computers)
+-----------------------------------------------------------------
+Your system uses TWO machines working together over your shop
+Wi-Fi:
+
+  * THE ADMIN LAPTOP  - "the owner's computer"
+      - Keeps ALL the records (the main database)
+      - Full access: sales, stock, reports, suppliers, refunds,
+        expenses, settings
+      - Powerful dashboard with charts to see how the shop is doing
+      - Bluetooth / thermal receipt printer
+
+  * THE CASHIER POS  - "the billing counter computer"
+      - Large touch screen for fast billing
+      - The cashier logs in with their own name
+      - Sees the sales counters for the day and can do GRN
+      - Customer Display shown on the second screen (see below)
+
+They connect automatically. Switch on both machines, open the
+program on both, and they find each other by themselves.
+
+-----------------------------------------------------------------
+2. LOGGING IN
+-----------------------------------------------------------------
+There are two ready-made logins (they always work):
+
+  Administrator   ->  username:  admin      password: admin123
+  Cashier         ->  username:  cashier    password: 1234
+
+You can change the password anytime on the Settings / Profile
+screen. Every bill, refund, and stock entry is recorded under the
+person who did it.
+
+-----------------------------------------------------------------
+3. WHAT THE SYSTEM CAN DO
+-----------------------------------------------------------------
+BEFORE LISTING: watch out for big notes - the things marked  ***
+are the special, "super cool" features.
+
+*** CUSTOMER DISPLAY (second screen) ***
+While the cashier is billing, the SECOND MONITOR in front of the
+customer automatically shows:
+   - Your shop logo and "Randil Grocery" branding
+   - The items being scanned, one by one
+   - Subtotal, discount and TOTAL AMOUNT in big letters
+So customers can watch their bill as they shop. The cashier can
+switch it on or off anytime from the dashboard.
+
+*** PROFESSIONAL DASHBOARD (admin laptop) ***
+The moment you open the system you see:
+   - A personal greeting ("Good Morning...") with today's date
+   - TODAY'S REVENUE and today's sale count in one glance
+   - Six big colour cards: Revenue, Transactions, Estimated
+     Profit, Margin, Units Sold, Stock at Risk.
+       Revenue card even shows if you are up or down vs the
+       previous period (+12.5% style) - see trends without
+       doing any maths
+   - Revenue chart for Today / 7 days / 30 days (one tap)
+   - Top selling items, Inventory health pie chart
+   - Low stock alerts, Cashier leaderboard (who sold most)
+
+*** BILLING (POS) like a supermarket ***
+   - Type or scan the barcode - item appears instantly
+   - Touch screen friendly, works fast on a stand
+   - Cash OR Card OR split payment (part cash + part card)
+   - Automatically tells you the change to give
+   - Prints a proper receipt (shop name, address, phone, thank-you
+     message) on your thermal printer
+   - Stock is deducted from the OLDEST items first (first-in
+     first-out) so older stock sells before it expires
+
+*** STOCK & INVENTORY ***
+   - Products with barcode, buying price, selling price
+   - Stock arrival is recorded with GRN (Goods Received Note) -
+     the cashier can receive new stock too
+   - Low stock and "out of stock" warnings on the dashboard
+   - Batch management: track batches, expiry, and stock that was
+     received against Purchase Orders
+
+*** PURCHASES & SUPPLIERS ***
+   - Create Purchase Orders to your suppliers
+   - Keep a list of all suppliers with contact details
+   - When goods arrive, receive them into stock quickly
+
+*** REFUNDS & RETURNS ***
+   - Customers return items? Process a refund properly
+   - Refunds need approval (owner) to prevent misuse
+   - Returned stock is put back on the shelf automatically
+
+*** CUSTOMERS, EXPENSES, REPORTS ***
+   - Keep a simple customer list (especially for credit customers)
+   - Record daily shop expenses (electricity, staff, etc.)
+   - Reports: daily and monthly totals, sales by cashier, best
+     selling items, payment method breakdown (cash vs card) -
+     printable for your records
+
+*** BACKUP & SAFETY ***
+   - Your data is saved on the admin laptop
+   - One-click backup to a memory stick / folder
+   - Soon: automatic password-protected backup to the internet so
+     even if the laptop dies, nothing is lost
+
+*** BILLING SCREEN IMPROVEMENT ***
+   - The payment buttons (TOTAL AMOUNT, Paid / Change, PAY, HOLD,
+     CLEAR) are now fixed at the bottom of the billing screen - no
+     matter what, they never scroll out of reach when the billing
+     list is long.
+
+*** MOBILE APP (the "Randil Grocery POS" app on YOUR phone) ***
+   - Free to install, NO login to remember - you open it and it
+     shows the shop.
+   - You can switch the look between Light / Dark and pick a colour.
+   - See LIVE data from the shop even while you are at home:
+       Home      - today's takings, charts, best selling items
+       Sales     - every bill made at the shop
+       Stock     - all products + which are running LOW
+       Reports   - refunds, stock arrivals, expenses, customers
+       Settings  - change theme / colours, refresh, reconnect
+
+-----------------------------------------------------------------
+4. QUICK "HOW DO I..."
+-----------------------------------------------------------------
+  Open billing ............. Login as admin or cashier > tap POS
+  See today's takings ...... Admin laptop > Dashboard (top right)
+  Add a new item ........... Admin > Inventory > Add Product
+  Receive new stock ........ Cashier or Admin > GRN > + New
+  Refund an item ........... Admin or Cashier > Refunds
+  Print yesterday's report . Admin > Reports > pick date > Print
+  Close the customer screen . Cashier dashboard > "Close Customer
+                             Display" button
+  Connect the two PCs ...... Settings > Multi-PC & Live Sync
+                             (Turn ON server on the laptop, find
+                             the server on the counter computer)
+  Turn ON phone sharing .... On the laptop: Settings > Cloud
+                             > enable + Save & Sync Now
+                             (one-time, set up by your technician)
+  Open the phone app ........ Tap the "Randil Grocery POS" app
+                             > first time: enter your shop details
+                             (one-time, set up by your technician)
+
+-----------------------------------------------------------------
+5. WHAT YOU GOT  (new!)
+-----------------------------------------------------------------
+*** MOBILE APP - DONE! ***
+Your own private app on YOUR phone so you can check the shop from
+home:
+   - Today's sales total and charts
+   - Stock levels (see what's low before you come in)
+   - Recent sales list and reports
+Everything is stored in YOUR private online space (free) and only
+you can see it with your phone.
+   First setup (takes 5 minutes, done once by Jerusha Tech):
+   1. A private online space ("Supabase") is created free of charge
+   2. On the laptop: Settings > Cloud - switch it ON, paste 2
+      codes given to you, press "Save & Sync Now" - the shop's
+      data then flows to your private space automatically, keeping
+      itself up to date by itself.
+   3. On the phone: open the app, in Setup paste the same 2 codes
+      + your shop name. Done!
+
+-----------------------------------------------------------------
+6. SUPPORT
+-----------------------------------------------------------------
+If anything confuses you or something goes wrong, simply contact:
+
+   Jerusha Tech Solutions
+   070 3027 611
+   jerushasharon1999@gmail.com
+
+We help you remotely, so the system is always up to date and safe.
+
+Thank you for choosing Randil Grocery POS!
+=================================================================
