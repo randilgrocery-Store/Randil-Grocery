@@ -15,8 +15,11 @@ import '../../components/status_badge.dart';
 import '../../providers/dashboard_range_controller.dart';
 import '../../providers/product_provider.dart';
 import '../../providers/profit_loss_provider.dart';
+import '../../providers/reload_card_provider.dart';
+import '../../providers/repack_provider.dart';
 import '../../providers/reports_provider.dart';
 import '../../providers/settings_provider.dart';
+import '../../providers/wastage_provider.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_money.dart';
 import '../../theme/app_tokens.dart';
@@ -150,6 +153,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       final now = DateTime.now();
       await context.read<ProductProvider>().loadProducts();
+      // Operations overview (all-time reload ledger, production & wastage).
+      unawaited(context.read<ReloadCardProvider>().loadCards());
+      unawaited(context.read<RepackProvider>().loadAll());
+      unawaited(context.read<WastageProvider>().loadWastages());
       final reports = context.read<ReportsProvider>();
       await reports.generateDailyReport(now);
       await reports.generateMonthlyReport(now.year, now.month);
@@ -368,6 +375,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 _buildRowThree(),
                 const SizedBox(height: AppSpacing.md),
                 _buildRowFour(),
+                const SizedBox(height: AppSpacing.md),
+                _buildOperationsRow(),
                 const SizedBox(height: AppSpacing.md),
                 _buildQuickActions(),
               ],
@@ -1374,6 +1383,222 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // Quick actions
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Operations overview — Reload · Repack · Wastage (all-time)
+  // -------------------------------------------------------------------------
+
+  Widget _buildOperationsRow() {
+    return _rowOrStack([
+      Expanded(child: _buildReloadPanel()),
+      Expanded(child: _buildRepackPanel()),
+      Expanded(child: _buildWastagePanel()),
+    ]);
+  }
+
+  Widget _buildReloadPanel() {
+    final reload = context.watch<ReloadCardProvider>();
+    return AppCard(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const AppSectionHeader(
+            title: 'Reload credit',
+            icon: Icons.sim_card_outlined,
+            dense: true,
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          _opsGrid([
+            _OpsStat(
+              label: 'Bought',
+              value: AppMoney.format(reload.totalBoughtValue),
+              icon: Icons.add_card,
+            ),
+            _OpsStat(
+              label: 'Sold',
+              value: AppMoney.format(reload.totalSoldValue),
+              icon: Icons.currency_rupee,
+            ),
+            _OpsStat(
+              label: 'Remaining',
+              value: AppMoney.format(reload.remainingValue),
+              icon: Icons.account_balance_wallet_outlined,
+              tone: reload.remainingValue > 0
+                  ? StatusTone.success
+                  : StatusTone.neutral,
+            ),
+            _OpsStat(
+              label: 'Profit',
+              value: AppMoney.format(reload.totalProfit),
+              icon: Icons.trending_up,
+              tone: reload.totalProfit > 0
+                  ? StatusTone.success
+                  : StatusTone.danger,
+            ),
+          ]),
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            '${reload.boughtCount} buys · ${reload.soldCount} sales to date',
+            style: context.typography.caption,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRepackPanel() {
+    final repack = context.watch<RepackProvider>();
+    final products = context.watch<ProductProvider>().allProducts;
+    final produced = repack.productions
+        .fold<double>(0, (s, p) => s + p.quantityProduced);
+    final madeCost = repack.productions
+        .fold<double>(0, (s, p) => s + p.totalComponentCost);
+    final finishedIds = <String>{};
+    for (final r in repack.recipes) {
+      finishedIds.add(r.finishedProductId);
+    }
+    final onHand = products
+        .where((p) => finishedIds.contains(p.id))
+        .fold<double>(0, (s, p) => s + p.quantity);
+    final lastRun = repack.productions.isEmpty
+        ? null
+        : repack.productions
+            .map((p) => p.producedAt)
+            .reduce((a, b) => a.isAfter(b) ? a : b);
+    return AppCard(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const AppSectionHeader(
+            title: 'Repack & production',
+            icon: Icons.inventory_2_outlined,
+            dense: true,
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          _opsGrid([
+            _OpsStat(
+              label: 'Packed (all time)',
+              value: '${AppMoney.integer(produced)} pcs',
+              icon: Icons.widgets_outlined,
+            ),
+            _OpsStat(
+              label: 'On hand now',
+              value: _qtyString(onHand),
+              icon: Icons.inventory_2,
+              tone: onHand > 0 ? StatusTone.success : StatusTone.neutral,
+            ),
+            _OpsStat(
+              label: 'Runs done',
+              value: AppMoney.integer(repack.productions.length),
+              icon: Icons.factory_outlined,
+            ),
+            _OpsStat(
+              label: 'Made for',
+              value: AppMoney.format(madeCost),
+              icon: Icons.payments_outlined,
+            ),
+          ]),
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            '${repack.recipes.length} recipes · last run '
+            '${lastRun == null ? '—' : _dateShort(lastRun)}',
+            style: context.typography.caption,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWastagePanel() {
+    final wastage = context.watch<WastageProvider>();
+    final records = wastage.wastages;
+    final qtyLost = records.fold<double>(0, (s, w) => s + w.quantity);
+    final valueLost = records.fold<double>(0, (s, w) => s + w.lossValue);
+    final lastEntry = records.isEmpty
+        ? null
+        : records
+            .map((w) => w.wastageDate)
+            .reduce((a, b) => a.isAfter(b) ? a : b);
+    return AppCard(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const AppSectionHeader(
+            title: 'Wastage',
+            icon: Icons.delete_forever_outlined,
+            dense: true,
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          _opsGrid([
+            _OpsStat(
+              label: 'Records',
+              value: AppMoney.integer(records.length),
+              icon: Icons.receipt_long,
+            ),
+            _OpsStat(
+              label: 'Qty lost',
+              value: _qtyString(qtyLost),
+              icon: Icons.scale,
+            ),
+            _OpsStat(
+              label: 'Worth lost',
+              value: AppMoney.format(valueLost),
+              icon: Icons.money_off,
+              tone: valueLost > 0 ? StatusTone.danger : StatusTone.neutral,
+            ),
+            _OpsStat(
+              label: 'Last entry',
+              value: lastEntry == null ? '—' : _dateShort(lastEntry),
+              icon: Icons.event,
+            ),
+          ]),
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            'Stock written off as damaged / expired',
+            style: context.typography.caption,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 2×2 grid of mini stats for the operations panels.
+  Widget _opsGrid(List<_OpsStat> stats) {
+    assert(stats.length == 4);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final itemWidth = (constraints.maxWidth - AppSpacing.gutter) / 2;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                SizedBox(width: itemWidth, child: stats[0]),
+                const SizedBox(width: AppSpacing.gutter),
+                SizedBox(width: itemWidth, child: stats[1]),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Row(
+              children: [
+                SizedBox(width: itemWidth, child: stats[2]),
+                const SizedBox(width: AppSpacing.gutter),
+                SizedBox(width: itemWidth, child: stats[3]),
+              ],
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  String _qtyString(double v) {
+    if (v == v.roundToDouble()) return AppMoney.integer(v);
+    return AppMoney.plain(v);
+  }
+
   Widget _buildQuickActions() {
     final actions = <(IconData, String, VoidCallback?)>[
       (Icons.point_of_sale, 'New sale', widget.onNavigateToPos),
@@ -1501,4 +1726,65 @@ class _SparklinePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _SparklinePainter oldDelegate) =>
       oldDelegate.values != values || oldDelegate.color != color;
+}
+
+/// A single compact metric tile used inside the dashboard operations panels
+/// (Reload · Repack · Wastage).
+class _OpsStat extends StatelessWidget {
+  const _OpsStat({
+    required this.label,
+    required this.value,
+    required this.icon,
+    this.tone = StatusTone.neutral,
+  });
+
+  final String label;
+  final String value;
+  final IconData icon;
+  final StatusTone tone;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.appColors;
+    final t = context.typography;
+    final accent = tone.fg(colors);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.sm,
+        vertical: AppSpacing.xs,
+      ),
+      decoration: BoxDecoration(
+        color: tone.bg(colors).withValues(alpha: 0.45),
+        borderRadius: AppRadius.controlRadius,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 14, color: accent),
+              const SizedBox(width: AppSpacing.xs),
+              Expanded(
+                child: Text(
+                  label,
+                  style: t.caption,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: tone == StatusTone.neutral
+                ? t.numberSm
+                : t.numberSm.copyWith(color: accent),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
 }

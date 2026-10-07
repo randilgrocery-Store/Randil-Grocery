@@ -6,6 +6,7 @@ import '../../../data/models/recipe.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/product_provider.dart';
 import '../../providers/repack_provider.dart';
+import '../../theme/app_money.dart';
 import '../../widgets/custom_widgets.dart';
 
 class RepackScreen extends StatefulWidget {
@@ -34,6 +35,113 @@ class _RepackScreenState extends State<RepackScreen> with SingleTickerProviderSt
     super.dispose();
   }
 
+  /// Quick quantity overview for the shop: how many packets have been packed,
+  /// how many are ready on the shelf, how many runs have been done.
+  Widget _buildOverviewStrip() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Consumer2<ProductProvider, RepackProvider>(
+        builder: (context, prodProv, repProv, _) {
+          final produced = repProv.productions
+              .fold<double>(0, (s, p) => s + p.quantityProduced);
+          final madeCost = repProv.productions
+              .fold<double>(0, (s, p) => s + p.totalComponentCost);
+          final finishedIds = <String>{
+            for (final r in repProv.recipes) r.finishedProductId,
+          };
+          final onHand = prodProv.allProducts
+              .where((p) => finishedIds.contains(p.id))
+              .fold<double>(0, (s, p) => s + p.quantity);
+          return Row(
+            children: [
+              _statTile(
+                label: 'Packed (all time)',
+                value: '${_fmtQty(produced)} pcs',
+                icon: Icons.widgets_outlined,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(width: 12),
+              _statTile(
+                label: 'On hand now',
+                value: _fmtQty(onHand),
+                icon: Icons.inventory_2,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(width: 12),
+              _statTile(
+                label: 'Runs done',
+                value: '${repProv.productions.length}',
+                icon: Icons.factory_outlined,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(width: 12),
+              _statTile(
+                label: 'Made for',
+                value: AppMoney.format(madeCost),
+                icon: Icons.payments_outlined,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _statTile({
+    required String label,
+    required String value,
+    required IconData icon,
+    required Color color,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(icon, size: 16, color: color),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: Theme.of(context).textTheme.bodySmall,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 2),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                value,
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _fmtQty(double v) {
+    if (v == v.roundToDouble()) return AppMoney.integer(v);
+    return AppMoney.plain(v);
+  }
+
   @override
   Widget build(BuildContext context) {
     final role = context.watch<AuthProvider>().currentUser?.role;
@@ -47,9 +155,16 @@ class _RepackScreenState extends State<RepackScreen> with SingleTickerProviderSt
         ),
       ),
       body: isAdmin
-          ? TabBarView(
-              controller: _tabController,
-              children: const [_RecipesTab(), _ProductionsTab()],
+          ? Column(
+              children: [
+                _buildOverviewStrip(),
+                Expanded(
+                  child: TabBarView(
+                    controller: _tabController,
+                    children: const [_RecipesTab(), _ProductionsTab()],
+                  ),
+                ),
+              ],
             )
           : const Center(
               child: Text('Repack is restricted to Admin only'),
