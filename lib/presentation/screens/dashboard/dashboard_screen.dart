@@ -307,12 +307,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
             children: _withGaps(children),
           );
         }
+        // The dashboard scrolls (unbounded height), so a Column branch must NOT
+        // keep the Expanded/Flexible wrappers: they would throw "non-zero flex
+        // with unbounded constraints" and blank the page on narrow windows.
+        // Strip the flex and stack the panels full-width instead.
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: _withGaps(children),
+          children: _withGaps(_stacked(children)),
         );
       },
     );
+  }
+
+  /// Flex wrappers only make sense next to siblings inside a bounded row; when
+  /// a row degrades to a stacked column they are dropped so the panels can
+  /// self-size inside the scrolling dashboard.
+  List<Widget> _stacked(List<Widget> children) {
+    return [
+      for (final child in children)
+        if (child is Flexible) child.child else child,
+    ];
   }
 
   List<Widget> _withGaps(List<Widget> children) {
@@ -626,34 +640,74 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // -------------------------------------------------------------------------
 
   Widget _buildChartRow() {
-    return _rowOrStack([
-      Expanded(flex: 3, child: _buildRevenueChart()),
-      Expanded(flex: 2, child: _buildPlPanel()),
-    ]);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide =
+            constraints.maxWidth >= AppBreakpoints.minSupportedWidth;
+        final chart = _buildRevenueChart(fillHeight: wide);
+        final pl = _buildPlPanel();
+        if (!wide) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              chart,
+              const SizedBox(height: AppSpacing.gutter),
+              pl,
+            ],
+          );
+        }
+        // Pin the row to one height and stretch both cards so the Revenue chart
+        // no longer floats over empty space beside the much taller Profit & Loss
+        // panel. The chart fills its card; the tall P&L scrolls inside its card.
+        return SizedBox(
+          height: AppSizes.chartRowHeight,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(flex: 3, child: chart),
+              const SizedBox(width: AppSpacing.gutter),
+              Expanded(flex: 2, child: pl),
+            ],
+          ),
+        );
+      },
+    );
   }
 
-  Widget _buildRevenueChart() {
-    return AppCard(
-      padding: const EdgeInsets.all(AppSpacing.md),
-      clipContent: true,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const AppSectionHeader(
-            title: 'Revenue trend',
-            icon: Icons.show_chart,
-            dense: true,
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          SizedBox(
-            height: AppSizes.chartHeight,
-            child: _salesPane(
-              future: _salesFuture,
-              skeletonHeight: AppSizes.chartHeight,
-              builder: (context, sales) => _buildLineChart(sales),
+  Widget _buildRevenueChart({bool fillHeight = false}) {
+    return KeyedSubtree(
+      key: const ValueKey('dashboard-revenue-chart'),
+      child: AppCard(
+        padding: const EdgeInsets.all(AppSpacing.md),
+        clipContent: true,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const AppSectionHeader(
+              title: 'Revenue trend',
+              icon: Icons.show_chart,
+              dense: true,
             ),
-          ),
-        ],
+            const SizedBox(height: AppSpacing.sm),
+            if (fillHeight)
+              Expanded(
+                child: _salesPane(
+                  future: _salesFuture,
+                  skeletonHeight: AppSizes.chartHeight - 40,
+                  builder: (context, sales) => _buildLineChart(sales),
+                ),
+              )
+            else
+              SizedBox(
+                height: AppSizes.chartHeight,
+                child: _salesPane(
+                  future: _salesFuture,
+                  skeletonHeight: AppSizes.chartHeight,
+                  builder: (context, sales) => _buildLineChart(sales),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -663,11 +717,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final t = context.typography;
 
     if (sales.isEmpty) {
-      return AppEmptyState(
-        icon: Icons.show_chart,
-        title: 'No sales in this range',
-        message: 'Bills recorded in ${_range.fullLabel} will appear here.',
-        compact: true,
+      return Center(
+        child: AppEmptyState(
+          icon: Icons.show_chart,
+          title: 'No sales in this range',
+          message: 'Bills recorded in ${_range.fullLabel} will appear here.',
+          compact: true,
+        ),
       );
     }
 
@@ -758,11 +814,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildPlPanel() => ProfitLossPanel(
+  Widget _buildPlPanel() => KeyedSubtree(
+      key: const ValueKey('dashboard-pl-panel'),
+      child: ProfitLossPanel(
         rangeLabel: _range.fullLabel,
         isRefreshing: _refreshing,
         onRefresh: () => unawaited(_refresh()),
-      );
+      ),
+    );
 
   // -------------------------------------------------------------------------
   // Row 3 — Top selling · Inventory health · Needs reordering

@@ -45,86 +45,98 @@ class ProfitLossPanel extends StatelessWidget {
               ),
             ],
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _header(context),
-              const SizedBox(height: 16),
-              if (!ready)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 28),
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              else ...[
-                _netBanner(context, pl),
-                const SizedBox(height: 18),
-                _sectionLabel(context, 'Money In', Icons.savings_outlined,
-                    _green),
-                _line(context, 'Sales revenue', pl.d('revenue'),
-                    hint: '${pl.i('bills')} bills'),
-                _line(context, 'Discounts (already deducted at billing)', -pl.d('discounts'),
-                    negative: true, muted: true),
-                _line(context, 'Net sales taken', pl.d('revenue') - pl.d('discounts'),
-                    bold: true),
-                _line(context, 'Cash / Card',
-                    0,
-                    hint: 'Cash ${_rs(pl.d('cashSales'))}  •  '
-                        'Card ${_rs(pl.d('cardSales'))}',
-                    icon: Icons.payments_outlined),
-                const SizedBox(height: 10),
-                _sectionLabel(context, 'Cost of the goods sold',
-                    Icons.inventory_2_outlined, _amber),
-                _line(context, 'Cost of items sold', -pl.d('cogs'),
-                    negative: true, hint: '${_qty(pl.d('itemsSold'))} items'),
-                _line(context, 'Gross profit', pl.d('grossProfit'),
-                    bold: true,
-                    hint: '${pl.d('grossMarginPct').toStringAsFixed(1)}% margin'),
-                const SizedBox(height: 10),
-                _sectionLabel(context, 'Running costs', Icons.money_off,
-                    _red),
-                _line(context, 'Wastage loss', -pl.d('wastageLoss'),
-                    negative: true,
-                    hint: '${pl.i('wastageCount')} entries • '
-                        '${_qty(pl.d('wastageUnits'))} units'),
-                _line(context, 'Refunds (already deducted from sales)', -pl.d('refundLoss'),
-                    negative: true,
-                    hint: pl.d('refundPending') > 0
-                        ? '${pl.i('refundCount')} paid • '
-                            '${_rs(pl.d('refundPending'))} still to pay'
-                        : '${pl.i('refundCount')} refunds'),
-                _line(context, 'Shop expenses', -pl.d('expenseTotal'),
-                    negative: true,
-                    hint: '${pl.i('expenseCount')} entries'),
-                if (pl.expensesByCategory.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  _expenseChips(context, pl.expensesByCategory),
+          // The admin dashboard pins this card beside the Revenue chart, so when
+          // a bounded height is imposed (wide windows) the tall detail scrolls
+          // inside the card instead of spilling next to / under the chart; the
+          // stacked (narrow) layout stays at natural height.
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final content = Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _header(context),
+                  const SizedBox(height: 16),
+                  if (!ready)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 28),
+                      child: Center(child: CircularProgressIndicator()),
+                    )
+                  else ...[
+                    _netBanner(context, pl),
+                    const SizedBox(height: 18),
+                    _sectionLabel(context, 'Money In', Icons.savings_outlined,
+                        _green),
+                    _line(context, 'Sales revenue', pl.d('revenue'),
+                        hint: '${pl.i('bills')} bills'),
+                    _line(context, 'Discounts (already deducted at billing)', -pl.d('discounts'),
+                        negative: true, muted: true),
+                    _line(context, 'Net sales taken', pl.d('revenue') - pl.d('discounts'),
+                        bold: true),
+                    _line(context, 'Cash / Card',
+                        0,
+                        hint: 'Cash ${_rs(pl.d('cashSales'))}  •  '
+                            'Card ${_rs(pl.d('cardSales'))}',
+                        icon: Icons.payments_outlined),
+                    const SizedBox(height: 10),
+                    _sectionLabel(context, 'Cost of the goods sold',
+                        Icons.inventory_2_outlined, _amber),
+                    _line(context, 'Cost of items sold', -pl.d('cogs'),
+                        negative: true, hint: '${_qty(pl.d('itemsSold'))} items'),
+                    _line(context, 'Gross profit', pl.d('grossProfit'),
+                        bold: true,
+                        hint: '${pl.d('grossMarginPct').toStringAsFixed(1)}% margin'),
+                    const SizedBox(height: 10),
+                    _sectionLabel(context, 'Running costs', Icons.money_off,
+                        _red),
+                    _line(context, 'Wastage loss', -pl.d('wastageLoss'),
+                        negative: true,
+                        hint: '${pl.i('wastageCount')} entries • '
+                            '${_qty(pl.d('wastageUnits'))} units'),
+                    _line(context, 'Refunds (already deducted from sales)', -pl.d('refundLoss'),
+                        negative: true,
+                        hint: pl.d('refundPending') > 0
+                            ? '${pl.i('refundCount')} paid • '
+                                '${_rs(pl.d('refundPending'))} still to pay'
+                            : '${pl.i('refundCount')} refunds'),
+                    _line(context, 'Shop expenses', -pl.d('expenseTotal'),
+                        negative: true,
+                        hint: '${pl.i('expenseCount')} entries'),
+                    if (pl.expensesByCategory.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      _expenseChips(context, pl.expensesByCategory),
+                    ],
+                    const SizedBox(height: 14),
+                    _totalRow(context, pl),
+                    const SizedBox(height: 16),
+                    _sectionLabel(context, 'Money in and out of the till',
+                        Icons.swap_horiz, _blue),
+                    _line(context, 'Stock received from suppliers',
+                        pl.d('purchaseTotal'),
+                        hint: '${pl.i('purchaseCount')} goods received notes'),
+                    _line(context, 'Paid to suppliers', pl.d('supplierPaid'),
+                        hint: 'Cash ${_rs(pl.d('supplierPaidCash'))} • '
+                            'Cheque ${_rs(pl.d('supplierPaidCheque'))}',
+                        icon: Icons.payments_outlined),
+                    _line(context, 'Still owed to suppliers',
+                        pl.d('supplierOutstanding'),
+                        hint: 'Outstanding balance',
+                        icon: Icons.account_balance_wallet_outlined),
+                    _line(context, 'Stock on hand (cost value)', pl.d('stockValue'),
+                        hint: '${pl.i('stockItems')} items in stock',
+                        icon: Icons.warehouse_outlined),
+                    const SizedBox(height: 16),
+                    _sectionLabel(context, 'How each part performed',
+                        Icons.grid_view_rounded, _blue),
+                    const SizedBox(height: 10),
+                    _moduleTiles(context, pl),
+                  ],
                 ],
-                const SizedBox(height: 14),
-                _totalRow(context, pl),
-                const SizedBox(height: 16),
-                _sectionLabel(context, 'Money in and out of the till',
-                    Icons.swap_horiz, _blue),
-                _line(context, 'Stock received from suppliers',
-                    pl.d('purchaseTotal'),
-                    hint: '${pl.i('purchaseCount')} goods received notes'),
-                _line(context, 'Paid to suppliers', pl.d('supplierPaid'),
-                    hint: 'Cash ${_rs(pl.d('supplierPaidCash'))} • '
-                        'Cheque ${_rs(pl.d('supplierPaidCheque'))}',
-                    icon: Icons.payments_outlined),
-                _line(context, 'Still owed to suppliers',
-                    pl.d('supplierOutstanding'),
-                    hint: 'Outstanding balance',
-                    icon: Icons.account_balance_wallet_outlined),
-                _line(context, 'Stock on hand (cost value)', pl.d('stockValue'),
-                    hint: '${pl.i('stockItems')} items in stock',
-                    icon: Icons.warehouse_outlined),
-                const SizedBox(height: 16),
-                _sectionLabel(context, 'How each part performed',
-                    Icons.grid_view_rounded, _blue),
-                const SizedBox(height: 10),
-                _moduleTiles(context, pl),
-              ],
-            ],
+              );
+              if (constraints.hasBoundedHeight) {
+                return SingleChildScrollView(child: content);
+              }
+              return content;
+            },
           ),
         );
       },

@@ -87,6 +87,12 @@ abstract final class AppSizes {
   static const double tableRowHeight = minTapTarget;
 
   static const double chartHeight = 240;
+
+  /// Height of the pinned Revenue-trend + Profit&Loss row (dashboard row 2).
+  /// Both cards stretch to this exact height so the chart never floats above
+  /// an empty slot beside the taller P&L detail sheet.
+  static const double chartRowHeight = 430;
+
   static const double sparklineHeight = 28;
 }
 

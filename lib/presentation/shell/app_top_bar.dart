@@ -67,7 +67,14 @@ class _AppTopBarState extends State<AppTopBar> {
       ),
       child: Row(
         children: [
-          Text(widget.title, style: typography.h3),
+          Flexible(
+            child: Text(
+              widget.title,
+              style: typography.h3,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
           const SizedBox(width: AppSpacing.sm),
           const Expanded(child: SizedBox.shrink()),
           const _NetworkChip(),
@@ -112,27 +119,36 @@ class _NetworkChip extends StatelessWidget {
 
         return Tooltip(
           message: 'LAN mode: ${network.mode.name}',
-          child: Container(
-            height: 34,
-            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-            decoration: BoxDecoration(
-              color: colors.softOf(color),
-              borderRadius: AppRadius.pillRadius,
-              border: Border.all(color: color.withValues(alpha: 0.35)),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 16, color: color),
-                const SizedBox(width: AppSpacing.xs),
-                Text(
-                  network.statusLabel,
-                  style: context.typography.label.copyWith(
-                    color: color,
-                    fontWeight: FontWeight.w600,
+          child: ConstrainedBox(
+            // A long status label must never push the top bar off-screen on a
+            // narrow POS window; it ellipsizes instead.
+            constraints: const BoxConstraints(maxWidth: 240),
+            child: Container(
+              height: 34,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+              decoration: BoxDecoration(
+                color: colors.softOf(color),
+                borderRadius: AppRadius.pillRadius,
+                border: Border.all(color: color.withValues(alpha: 0.35)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 16, color: color),
+                  const SizedBox(width: AppSpacing.xs),
+                  Flexible(
+                    child: Text(
+                      network.statusLabel,
+                      style: context.typography.label.copyWith(
+                        color: color,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         );
@@ -447,45 +463,52 @@ class _UserChip extends StatelessWidget {
 
     return Tooltip(
       message: '$name (${isAdmin ? 'Admin' : 'Cashier'})',
-      child: Container(
-        height: 40,
-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-        decoration: BoxDecoration(
-          color: colors.surfaceMuted,
-          borderRadius: AppRadius.pillRadius,
-          border: Border.all(color: colors.border),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 26,
-              height: 26,
-              alignment: Alignment.center,
-              decoration: const BoxDecoration(
-                color: Colors.transparent,
-                shape: BoxShape.circle,
-              ),
-              child: CircleAvatar(
-                radius: 13,
-                backgroundColor: colors.primarySoft,
-                child: Text(
-                  initials,
-                  style: typography.caption.copyWith(
-                    color: colors.onPrimarySoft,
-                    fontWeight: FontWeight.w700,
+      child: ConstrainedBox(
+        // A long user name must never push the top bar off-screen on a narrow
+        // POS window; it ellipsizes instead.
+        constraints: const BoxConstraints(maxWidth: 220),
+        child: Container(
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+          decoration: BoxDecoration(
+            color: colors.surfaceMuted,
+            borderRadius: AppRadius.pillRadius,
+            border: Border.all(color: colors.border),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 26,
+                height: 26,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(
+                  color: Colors.transparent,
+                  shape: BoxShape.circle,
+                ),
+                child: CircleAvatar(
+                  radius: 13,
+                  backgroundColor: colors.primarySoft,
+                  child: Text(
+                    initials,
+                    style: typography.caption.copyWith(
+                      color: colors.onPrimarySoft,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
-            ),
-            const SizedBox(width: AppSpacing.xs),
-            Text(
-              name,
-              style: typography.bodyStrong,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
+              const SizedBox(width: AppSpacing.xs),
+              Flexible(
+                child: Text(
+                  name,
+                  style: typography.bodyStrong,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
