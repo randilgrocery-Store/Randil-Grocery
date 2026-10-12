@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.1.18] - 2026-10-12
 
 ### Added
+- **GRN (Goods Received) now understands boxes AND loose pieces.** Cigarettes
+  and other boxed goods are received in the unit that makes sense: whole boxes
+  as usual, or **loose pieces** out of a partly-opened box — the dialog shows a
+  live conversion ("= 2 boxes + 5 pieces") and a Pieces/Boxes switch, so a box
+  with 5 left of 20 can be entered as 5 pieces or 0.25 boxes and both store
+  exactly the same stock. The GRN item table now shows stock as
+  "boxes + pieces" too. Stock is always kept in boxes, so the shelf and the
+  system add up.
 - **Sort/filter every busy feature by date and month.** The **Reload Cards**,
   **Wastage**, **Shopping Bags** and **Refund & Return** screens now share one
   date filter bar — **All time / Today / Yesterday / This week / This month /

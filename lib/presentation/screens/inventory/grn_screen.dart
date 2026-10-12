@@ -348,7 +348,11 @@ class _GrnScreenState extends State<GrnScreen>
                               ? _grnNumberController.text
                               : _lines[i].batchNumber,
                         )),
-                        DataCell(Text(fmtQty(_lines[i].quantity))),
+                        DataCell(Text(_lines[i].product.isBreakBulk
+                            ? _lines[i]
+                                .product
+                                .stockLabel(_lines[i].quantity)
+                            : fmtQty(_lines[i].quantity))),
                         DataCell(Text(
                             '$symbol ${_lines[i].costPrice.toStringAsFixed(2)}')),
                         DataCell(Text(
@@ -537,6 +541,23 @@ class _GrnScreenState extends State<GrnScreen>
         TextEditingController(text: existing?.batchNumber ?? '');
     DateTime? expiry = existing?.expiryDate;
 
+    // GRN stock is kept in the product's own unit (boxes). Break-bulk items
+    // may be received as whole boxes OR as loose pieces out of an opened box;
+    // whichever the owner types, it is converted to boxes before saving so the
+    // system stock always balances against the physical shelf.
+    var usePieces = false;
+
+    String qtyHint(Product p) => usePieces
+        ? 'Loose pieces received — becomes ${p.stockLabel(0)}'
+        : 'Whole boxes received — ${p.piecesPerBox} pieces per box';
+    String qtyPreview(Product p, String text) {
+      final typed = double.tryParse(text.trim()) ?? 0;
+      if (typed <= 0) return '';
+      final boxQty =
+          usePieces ? typed.round() / p.piecesPerBox : typed;
+      return '= ${p.stockLabel(boxQty)}';
+    }
+
     await showDialog<bool>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -562,6 +583,7 @@ class _GrnScreenState extends State<GrnScreen>
                     onChanged: (value) {
                       setDialogState(() {
                         selected = value;
+                        usePieces = false;
                         if (value != null) {
                           costController.text =
                               value.buyingPrice.toStringAsFixed(2);
@@ -587,9 +609,17 @@ class _GrnScreenState extends State<GrnScreen>
                         child: TextField(
                           controller: qtyController,
                           keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(
-                            labelText: 'Quantity *',
-                            prefixIcon: Icon(Icons.inventory),
+                          onChanged: (_) => setDialogState(() {}),
+                          decoration: InputDecoration(
+                            labelText: usePieces && selected != null &&
+                                    selected!.isBreakBulk
+                                ? 'Quantity (pieces) *'
+                                : 'Quantity (boxes) *',
+                            helperText: selected != null &&
+                                    selected!.isBreakBulk
+                                ? qtyPreview(selected!, qtyController.text)
+                                : null,
+                            prefixIcon: const Icon(Icons.inventory),
                           ),
                         ),
                       ),
@@ -606,6 +636,53 @@ class _GrnScreenState extends State<GrnScreen>
                       ),
                     ],
                   ),
+                  if (selected != null && selected!.isBreakBulk) ...[
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            usePieces
+                                ? qtyHint(selected!)
+                                : '${selected!.piecesPerBox} pieces per box'
+                                    ' — a partly-open box is entered as its'
+                                    ' box fraction (5 left of 20 = 0.25)',
+                            style: const TextStyle(
+                                color: PosAppTheme.textGray, fontSize: 11),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: PosAppTheme.lightGreen,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                                color: PosAppTheme.primaryGreen),
+                          ),
+                          child: InkWell(
+                            onTap: () => setDialogState(() {
+                              usePieces = !usePieces;
+                              final typed =
+                                  double.tryParse(qtyController.text.trim()) ??
+                                      0;
+                              qtyController.text = usePieces
+                                  ? fmtQty(typed * selected!.piecesPerBox)
+                                  : fmtQty(typed / selected!.piecesPerBox);
+                            }),
+                            child: Text(
+                              usePieces ? 'In pieces' : 'In boxes',
+                              style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: PosAppTheme.primaryGreen),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   TextField(
                     controller: sellController,
@@ -659,7 +736,12 @@ class _GrnScreenState extends State<GrnScreen>
                 final qty = double.tryParse(qtyController.text) ?? 0;
                 final cost = double.tryParse(costController.text) ?? -1;
                 final sell = double.tryParse(sellController.text) ?? -1;
-                if (qty <= 0 || cost < 0 || sell < 0) {
+                // Loose pieces become their fraction of a box (stock is kept
+                // in boxes) so the total cost/price stays correct.
+                final boxQty = usePieces && selected!.isBreakBulk
+                    ? qty.round() / selected!.piecesPerBox
+                    : qty;
+                if (boxQty <= 0 || cost < 0 || sell < 0) {
                   showTopSnackBar(context, 
                     const SnackBar(
                       content: Text('Enter a valid quantity, cost and price'),
@@ -669,7 +751,7 @@ class _GrnScreenState extends State<GrnScreen>
                 }
                 final line = _GrnLine(
                   product: selected!,
-                  quantity: qty,
+                  quantity: boxQty,
                   costPrice: cost,
                   sellingPrice: sell,
                   batchNumber: batchController.text.trim(),
