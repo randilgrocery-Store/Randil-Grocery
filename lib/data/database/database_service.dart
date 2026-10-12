@@ -1749,6 +1749,11 @@ class DatabaseService {
   /// A processed refund is dated by when it was paid out (`processedDate`,
   /// falling back to `createdAt` for legacy rows); a pending/approved one is
   /// dated by when it was raised.
+  ///
+  /// `loss` is the full cash handed back. `restockValue` is the cost value of
+  /// the goods that came back onto the shelf at the exact price the shop paid
+  /// for them (the original sale line's recorded FIFO cost), so the P&L can
+  /// credit that COGS back instead of charging the refund twice.
   Future<Map<String, dynamic>> _refundSummary(
     String fromIso,
     String toIso,
@@ -1756,6 +1761,7 @@ class DatabaseService {
     final db = await database;
     final rows = await db.query('refund_returns');
     var loss = 0.0;
+    var restockValue = 0.0;
     var pending = 0.0;
     var processed = 0;
     var pendingCount = 0;
@@ -1774,6 +1780,7 @@ class DatabaseService {
         if (inRange(processedOn)) {
           loss += amount;
           processed++;
+          restockValue += await _refundRestockValue(row);
         }
       } else if (status == 'pending' || status == 'approved') {
         if (inRange(row['createdAt'] as String?)) {
@@ -1784,10 +1791,64 @@ class DatabaseService {
     }
     return {
       'loss': loss,
+      'restockValue': restockValue,
       'pending': pending,
       'count': processed,
       'pendingCount': pendingCount,
     };
+  }
+
+  /// The cost value of the goods one processed refund put back on the shelf.
+  ///
+  /// Each returned line is valued at what the shop actually paid when it was
+  /// sold (the original bill line's recorded FIFO cost price). When the
+  /// originating bill cannot be found the product's buying price is used
+  /// instead, divided by the box size for break-bulk so a loose line is not
+  /// inflated by the whole box.
+  Future<double> _refundRestockValue(Map<String, dynamic> row) async {
+    final rawItems = row['items'];
+    if (rawItems is! String || rawItems.isEmpty) return 0;
+    final List<dynamic> decoded;
+    try {
+      decoded = jsonDecode(rawItems) as List;
+    } catch (_) {
+      return 0;
+    }
+    final sale =
+        await getSaleById(row['originalSaleId'] as String? ?? '');
+    var total = 0.0;
+    for (final raw in decoded) {
+      final item =
+          (raw as Map).map((key, value) => MapEntry(key.toString(), value));
+      final productId = item['productId'] as String? ?? '';
+      final quantity = (item['quantity'] as num?)?.toDouble() ?? 0;
+      final saleItemId = item['saleItemId'] as String? ?? '';
+      if (quantity <= 0 || productId.isEmpty) continue;
+
+      SaleItem? line;
+      if (sale != null) {
+        for (final l in sale.items) {
+          if (l.id == saleItemId || l.productId == productId) {
+            line = l;
+            break;
+          }
+        }
+      }
+
+      double unitCost = 0;
+      if (line != null && line.costPrice > 0) {
+        unitCost = line.costPrice;
+      } else {
+        final product = await getProductById(productId);
+        if (product != null) {
+          unitCost = (product.isBreakBulk && product.piecesPerBox > 1)
+              ? product.buyingPrice / product.piecesPerBox
+              : product.buyingPrice;
+        }
+      }
+      total += unitCost * quantity;
+    }
+    return total;
   }
 
   Future<void> insertReloadCard(ReloadCard card) async {
@@ -2636,6 +2697,11 @@ class DatabaseService {
     final reload = await getReloadSummary(start, end);
     final refunds =
         await _refundSummary(start.toIso8601String(), end.toIso8601String());
+    final refundPaid = refunds['loss'] as double;
+    final refundRestock = refunds['restockValue'] as double;
+    // Net effect on profit: money paid out, minus the cost value of the goods
+    // that came back onto the shelf.
+    final totalRefunds = refundPaid - refundRestock;
 
     final products = await getAllProducts();
     final productById = <String, Product>{
@@ -2657,7 +2723,6 @@ class DatabaseService {
     final totalExpenses =
         expenses.fold<double>(0, (sum, e) => sum + e.amount);
     final totalWastage = wastageReport['totalLoss'] as double;
-    final totalRefunds = refunds['loss'] as double;
     final reloadProfit = reload['profit'] as double;
     final totalSupplierReturns = await getSupplierReturnsTotal(
       start.toIso8601String(),
@@ -2683,6 +2748,8 @@ class DatabaseService {
       'totalWastage': totalWastage,
       'wastages': wastageReport['wastages'],
       'totalRefunds': totalRefunds,
+      'refundPaid': refundPaid,
+      'refundRestock': refundRestock,
       'reloadProfit': reloadProfit,
       'reloadSoldValue': reload['soldValue'],
       'totalSupplierReturns': totalSupplierReturns,
@@ -3059,7 +3126,11 @@ class DatabaseService {
 
     // ---- Refunds (money only leaves on a processed refund) --------------
     final refundSummary = await _refundSummary(fromIso, toIso);
-    final refundLoss = refundSummary['loss'] as double;
+    final refundPaid = refundSummary['loss'] as double;
+    // The goods that came back are worth what the shop paid for them, so only
+    // the part of the payout that is not returned as stock is a real loss.
+    final refundRestock = refundSummary['restockValue'] as double;
+    final refundLoss = refundPaid - refundRestock;
     final refundPending = refundSummary['pending'] as double;
     final refundProcessedCount = refundSummary['count'] as int;
     final refundPendingCount = refundSummary['pendingCount'] as int;
@@ -3189,6 +3260,8 @@ class DatabaseService {
       'wastageUnits': wastageUnits,
       'wastageCount': wasteRows.length,
       'refundLoss': refundLoss,
+      'refundPaid': refundPaid,
+      'refundRestock': refundRestock,
       'refundCount': refundProcessedCount,
       'refundPending': refundPending,
       'refundPendingCount': refundPendingCount,

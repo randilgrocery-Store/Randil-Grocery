@@ -11,6 +11,23 @@ import '../../providers/settings_provider.dart';
 import '../../widgets/custom_widgets.dart';
 import '../../widgets/date_range_filter_bar.dart';
 
+/// The share of a bill's face value (net of line discounts) the customer
+/// actually paid. A whole-bill discount is applied on the gross subtotal, so a
+/// refund must hand back this share of each returned line — paying out the
+/// face line price would return more money than the customer handed over.
+///
+/// Returns 1.0 when the bill carried no whole-bill discount; the caller
+/// multiplies line refunds by this factor (0.0 for a fully discounted bill).
+double refundBillDiscountRatio(Sale sale) {
+  final linesNet = sale.items.fold<double>(0, (sum, item) => sum + item.total);
+  if (linesNet <= 0) return 0;
+  return (sale.totalAmount / linesNet).clamp(0.0, 1.0).toDouble();
+}
+
+/// Face value of one returned unit for a line, after that line's own discount
+/// but before the whole-bill share ([refundBillDiscountRatio]) is applied.
+double refundUnitNet(SaleItem item) => item.price * (1 - (item.discount / 100));
+
 class RefundReturnScreen extends StatefulWidget {
   const RefundReturnScreen({super.key});
 
@@ -818,6 +835,7 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
   }
 
   double get _selectedTotal {
+    final ratio = refundBillDiscountRatio(widget.sale);
     var total = 0.0;
     for (var index = 0; index < widget.sale.items.length; index++) {
       if (!_selectedItems[index]) {
@@ -831,11 +849,14 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
       }
 
       final validQuantity = quantity.clamp(0.0, saleItem.quantity);
-      final unitNet = saleItem.price * (1 - (saleItem.discount / 100));
-      total += unitNet * validQuantity;
+      total += refundUnitNet(saleItem) * validQuantity * ratio;
     }
     return total;
   }
+
+  /// True when the bill carried a whole-bill discount that is being shared
+  /// across the returned lines.
+  bool get _hasBillDiscountShare => refundBillDiscountRatio(widget.sale) < 1;
 
   bool get _requiresTerminalReference =>
       _refundMethod == 'Original Payment' || _refundMethod == 'Card Reversal';
@@ -969,6 +990,29 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
                     ),
                   ),
                 ],
+                if (_hasBillDiscountShare) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .secondary
+                          .withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      'This bill was discounted as a whole, so the returned '
+                      'amounts include the discount share — the customer only '
+                      'pays back what they actually paid.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.secondary,
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 Container(
                   width: double.infinity,
@@ -999,6 +1043,7 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
                 ? null
                 : () {
                     final selectedItems = <RefundReturnItem>[];
+                    final ratio = refundBillDiscountRatio(widget.sale);
 
                     for (var index = 0; index < widget.sale.items.length; index++) {
                       if (!_selectedItems[index]) {
@@ -1014,8 +1059,6 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
                         continue;
                       }
 
-                      final unitNet =
-                          saleItem.price * (1 - (saleItem.discount / 100));
                       selectedItems.add(
                         RefundReturnItem(
                           saleItemId: saleItem.id,
@@ -1023,7 +1066,8 @@ class _CreateReturnDialogState extends State<CreateReturnDialog> {
                           productName: saleItem.productName,
                           quantity: validQuantity,
                           originalPrice: saleItem.price,
-                          refundAmount: unitNet * validQuantity,
+                          refundAmount:
+                              refundUnitNet(saleItem) * validQuantity * ratio,
                           reason: _reasonController.text.trim(),
                         ),
                       );

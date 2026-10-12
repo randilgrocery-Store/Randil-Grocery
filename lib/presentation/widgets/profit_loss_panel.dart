@@ -93,12 +93,17 @@ class ProfitLossPanel extends StatelessWidget {
                         negative: true,
                         hint: '${pl.i('wastageCount')} entries • '
                             '${_qty(pl.d('wastageUnits'))} units'),
-                    _line(context, 'Refunds paid out', -pl.d('refundLoss'),
+                    _line(context, 'Refunds paid out', -pl.d('refundPaid'),
                         negative: true,
                         hint: pl.d('refundPending') > 0
                             ? '${pl.i('refundCount')} paid • '
                                 '${_rs(pl.d('refundPending'))} still to pay'
                             : '${pl.i('refundCount')} refunds'),
+                    _line(context, 'Goods returned to stock', pl.d('refundRestock'),
+                        hint: pl.d('refundRestock') > 0
+                            ? 'cost value of the returned goods back on the shelf'
+                            : 'nothing returned yet',
+                        icon: Icons.assignment_return_outlined),
                     _line(context, 'Shop expenses', -pl.d('expenseTotal'),
                         negative: true,
                         hint: '${pl.i('expenseCount')} entries'),

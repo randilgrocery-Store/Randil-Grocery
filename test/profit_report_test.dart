@@ -110,6 +110,42 @@ void main() {
     });
   }
 
+  Future<void> insertRefundWithItems(
+    String id,
+    double amount,
+    List<Map<String, Object?>> items, {
+    String saleId = 's1',
+  }) async {
+    final now = DateTime.now().toIso8601String();
+    await db.insert('refund_returns', {
+      'id': id,
+      'originalSaleId': saleId,
+      'invoiceNumber': 'INV-$saleId',
+      'items': jsonEncode(items),
+      'totalRefundAmount': amount,
+      'refundMethod': 'Cash',
+      'status': 'Processed',
+      'notes': '',
+      'requesterId': '',
+      'requesterName': '',
+      'requestDate': now,
+      'processedDate': now,
+      'createdAt': now,
+    });
+  }
+
+  Map<String, Object?> refundItem(String saleItemId, double quantity,
+          {double refundAmount = 0}) =>
+      {
+        'saleItemId': saleItemId,
+        'productId': 'p1',
+        'productName': 'Milk',
+        'quantity': quantity,
+        'originalPrice': 100.0,
+        'refundAmount': refundAmount,
+        'reason': 'Change of mind',
+      };
+
   Future<void> insertReload(
       String id, double value, double cost, String status) async {
     final now = DateTime.now().toIso8601String();
@@ -152,6 +188,56 @@ void main() {
     expect(pl['refundLoss'], 20.0);
     // 100 + 5 - (60 + 5 + 20 + 10)
     expect(pl['netProfit'], 10.0);
+  });
+
+  test('a full refund reverses the sale: only the lost margin hits profit',
+      () async {
+    // Sale: Rs 100, cost 60 (gross +40). Then the whole bill is refunded; the
+    // returned goods are worth 60 back on the shelf.
+    await insertSale('s1', 100.0, 60.0);
+    await insertRefundWithItems(
+      'r-full',
+      100.0,
+      [refundItem('li1', 1.0, refundAmount: 100.0)],
+    );
+
+    final start = DateTime.now().subtract(const Duration(days: 1));
+    final end = DateTime.now().add(const Duration(days: 1));
+
+    final report = await DatabaseService().getProfitReport(start, end);
+    expect(report['refundPaid'], 100.0);
+    expect(report['refundRestock'], 60.0);
+    expect(report['totalRefunds'], 40.0); // paid 100, got 60 of goods back
+    // 100 - 60 - 40 = 0 — the whole sale cycle nets to nothing.
+    expect(report['netProfit'], 0.0);
+
+    final pl = await DatabaseService().getBusinessProfitLoss(start, end);
+    expect(pl['refundPaid'], 100.0);
+    expect(pl['refundRestock'], 60.0);
+    expect(pl['refundLoss'], 40.0);
+    expect(pl['netProfit'], 0.0);
+  });
+
+  test('a partial refund only reverses the margin on the returned portion',
+      () async {
+    // Sale: Rs 100, cost 60. Only half the goods are returned: customer gets
+    // Rs 50 back and the shop keeps the other half's Rs 20 margin.
+    await insertSale('s1', 100.0, 60.0);
+    await insertRefundWithItems(
+      'r-half',
+      50.0,
+      [refundItem('li1', 0.5, refundAmount: 50.0)],
+    );
+
+    final start = DateTime.now().subtract(const Duration(days: 1));
+    final end = DateTime.now().add(const Duration(days: 1));
+
+    final report = await DatabaseService().getProfitReport(start, end);
+    expect(report['refundPaid'], 50.0);
+    expect(report['refundRestock'], 30.0); // half of the cost
+    expect(report['totalRefunds'], 20.0);
+    // 100 - 60 - 20 = 20 profit (the margin on the half that stayed sold)
+    expect(report['netProfit'], 20.0);
   });
 
   test('reload margin only counts sold value inside the window', () async {

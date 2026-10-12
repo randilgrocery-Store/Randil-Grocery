@@ -345,7 +345,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
       ..writeln(money('Cost of Goods (COGS)', report['totalCogs'] as num))
       ..writeln(money('Expenses', report['totalExpenses'] as num))
       ..writeln(money('Wastage Loss', report['totalWastage'] as num))
-      ..writeln(money('Refunds Paid', report['totalRefunds'] as num))
+      ..writeln(money('Refunds Paid', report['refundPaid'] as num? ?? 0))
+      ..writeln(money('Goods Returned', report['refundRestock'] as num? ?? 0))
       ..writeln(money('Reload Profit', report['reloadProfit'] as num))
       ..writeln(money('Returns to Suppliers',
           report['totalSupplierReturns'] as num? ?? 0))
@@ -838,7 +839,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                       ),
                       StatCard(
                         icon: Icons.assignment_return,
-                        label: 'Refunds Paid',
+                        label: 'Refunds (Net)',
                         value:
                             'Rs. ${(_profitReport!['totalRefunds'] as num).toStringAsFixed(2)}',
                         color: PosAppTheme.warningOrange,
