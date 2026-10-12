@@ -8,6 +8,8 @@ class CartItem { // discount is in percentage (0-100)
     this.quantity = 1,
     this.discount = 0.0,
     double? unitPrice,
+    this.loose = false,
+    this.piecesPerBox = 1,
   }) : unitPrice = unitPrice ?? product.sellingPrice;
   final String id;
   final Product product;
@@ -21,6 +23,25 @@ class CartItem { // discount is in percentage (0-100)
   /// average (matching what is actually charged).
   double unitPrice;
 
+  /// True when this line sells loose single pieces taken from the box rather
+  /// than whole boxes. [quantity] then counts pieces and [unitPrice] is the
+  /// price of one piece.
+  final bool loose;
+
+  /// Pieces per box, copied from the product when the line was added. Only
+  /// meaningful for a [loose] line (used to work out the fraction of a box the
+  /// pieces take off stock).
+  final int piecesPerBox;
+
+  /// True when this line sells whole boxes (the box carries the only barcode).
+  bool get isBox => product.isBreakBulk && !loose;
+
+  /// How much this line removes from the product's stock, expressed in the
+  /// product's stock unit (boxes). A loose line takes `quantity / piecesPerBox`
+  /// of a box; every other line takes its quantity box for box.
+  double get stockQuantity =>
+      loose && piecesPerBox > 0 ? quantity / piecesPerBox : quantity;
+
   double get subtotal => unitPrice * quantity;
   double get discountAmount => (subtotal * discount) / 100;
   double get total => subtotal - discountAmount;
@@ -31,12 +52,16 @@ class CartItem { // discount is in percentage (0-100)
     double? quantity,
     double? discount,
     double? unitPrice,
+    bool? loose,
+    int? piecesPerBox,
   }) => CartItem(
       id: id ?? this.id,
       product: product ?? this.product,
       quantity: quantity ?? this.quantity,
       discount: discount ?? this.discount,
       unitPrice: unitPrice ?? this.unitPrice,
+      loose: loose ?? this.loose,
+      piecesPerBox: piecesPerBox ?? this.piecesPerBox,
     );
 
   @override

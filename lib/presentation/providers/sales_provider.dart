@@ -8,6 +8,7 @@ import '../../data/models/held_bill.dart';
 import '../../data/models/product.dart';
 import '../../data/models/sale.dart';
 import '../../data/services/network_sync.dart';
+import '../../data/services/stock_sync.dart';
 import '../../data/services/supabase_sync_service.dart';
 
 class SalesProvider extends ChangeNotifier {
@@ -32,19 +33,39 @@ class SalesProvider extends ChangeNotifier {
 
   /// Adds a product to the cart, resolving the price from the oldest stock
   /// batch (FIFO) so goods bought at an older price are sold at that price.
-  Future<void> addToCart(Product product, {double quantity = 1}) async {
+  ///
+  /// [loose] adds single pieces taken from the box (a product whose only
+  /// barcode is printed on the box) at the per-piece price instead of whole
+  /// boxes. A box line and a loose line for the same product are kept apart in
+  /// the cart.
+  Future<void> addToCart(
+    Product product, {
+    double quantity = 1,
+    bool loose = false,
+  }) async {
     if (product.quantity <= 0) {
       return; // Don't add out of stock items
     }
 
-    final existingIndex = _cartItems.indexWhere(
-      (item) => item.product.id == product.id,
-    );
+    final ppb = product.piecesPerBox > 0 ? product.piecesPerBox : 1;
+    final isLoose = loose && ppb > 1;
+    final lineId = isLoose ? '${product.id}#loose' : product.id;
+
+    final existingIndex = _cartItems.indexWhere((item) => item.id == lineId);
+
+    // Whole boxes and single pieces are always whole: a box line can never hold
+    // a fraction of a box, and a loose line can never hold a fraction of a
+    // piece (stock is snapped onto piece boundaries after each sale).
+    double capToWhole(double qty) =>
+        product.isBreakBulk ? qty.floorToDouble() : qty;
 
     final double desiredQuantity;
     if (existingIndex >= 0) {
       final updated = _cartItems[existingIndex];
-      final maxAddable = product.quantity - updated.quantity;
+      // Stock left for this line, converted back to the line's selling unit.
+      final maxAddable = capToWhole(isLoose
+          ? (product.quantity - updated.stockQuantity) * ppb
+          : product.quantity - updated.stockQuantity);
       if (maxAddable <= 0) {
         return;
       }
@@ -52,25 +73,31 @@ class SalesProvider extends ChangeNotifier {
       updated.quantity += add;
       desiredQuantity = updated.quantity;
     } else {
-      desiredQuantity = quantity.clamp(0.0, product.quantity);
+      final maxAddable = capToWhole(
+          isLoose ? product.quantity * ppb : product.quantity);
+      desiredQuantity = quantity.clamp(0.0, maxAddable);
       if (desiredQuantity <= 0) return;
       _cartItems.add(
         CartItem(
-          id: product.id,
+          id: lineId,
           product: product,
           quantity: desiredQuantity,
-          unitPrice: product.sellingPrice,
+          unitPrice: isLoose ? product.loosePrice : product.sellingPrice,
+          loose: isLoose,
+          piecesPerBox: ppb,
         ),
       );
     }
 
     // Resolve the FIFO price for the whole line. When the line spans several
     // batches with different prices this is the weighted average, exactly what
-    // processSale charges.
-    final index = _cartItems.indexWhere((i) => i.product.id == product.id);
-    if (index >= 0) {
+    // processSale charges. A loose line keeps the per-piece price the shop set,
+    // so it is not re-priced from the box batches.
+    final index = _cartItems.indexWhere((i) => i.id == lineId);
+    if (index >= 0 && !_cartItems[index].loose) {
       try {
-        final plan = await _dbService.getFifoPlan(product, desiredQuantity);
+        final plan =
+            await _dbService.getFifoPlan(product, _cartItems[index].stockQuantity);
         _cartItems[index].unitPrice = plan.effectivePrice;
       } catch (_) {
         // Keep the current price if the plan cannot be resolved.
@@ -80,13 +107,13 @@ class SalesProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void removeFromCart(String productId) {
-    _cartItems.removeWhere((item) => item.product.id == productId);
+  void removeFromCart(String lineId) {
+    _cartItems.removeWhere((item) => item.id == lineId);
     notifyListeners();
   }
 
-  Future<void> updateCartItemQuantity(String productId, double quantity) async {
-    final index = _cartItems.indexWhere((item) => item.product.id == productId);
+  Future<void> updateCartItemQuantity(String lineId, double quantity) async {
+    final index = _cartItems.indexWhere((item) => item.id == lineId);
     if (index < 0) {
       return;
     }
@@ -97,21 +124,44 @@ class SalesProvider extends ChangeNotifier {
     }
 
     final item = _cartItems[index];
-    final validQuantity = quantity.clamp(0.0, item.product.quantity);
+    // Stock left for this line, after what the other cart lines already hold.
+    var otherStock = 0.0;
+    for (final other in _cartItems) {
+      if (other.id != lineId && other.product.id == item.product.id) {
+        otherStock += other.stockQuantity;
+      }
+    }
+    final stockLeft = item.product.quantity - otherStock;
+    final ppb = item.piecesPerBox > 0 ? item.piecesPerBox : 1;
+    final rawMax = item.loose ? stockLeft * ppb : stockLeft;
+    // Break-bulk lines are always expressed in whole boxes / whole pieces.
+    final maxLine = item.product.isBreakBulk ? rawMax.floorToDouble() : rawMax;
+    final validQuantity =
+        maxLine <= 0 ? 0.0 : quantity.clamp(0.0, maxLine);
+    if (validQuantity <= 0) {
+      _cartItems.removeAt(index);
+      notifyListeners();
+      return;
+    }
     item.quantity = validQuantity;
 
-    try {
-      final plan = await _dbService.getFifoPlan(item.product, validQuantity);
-      item.unitPrice = plan.effectivePrice;
-    } catch (_) {
-      // Keep the current price if the plan cannot be resolved.
+    if (item.loose) {
+      item.unitPrice = item.product.loosePrice;
+    } else {
+      try {
+        final plan =
+            await _dbService.getFifoPlan(item.product, item.stockQuantity);
+        item.unitPrice = plan.effectivePrice;
+      } catch (_) {
+        // Keep the current price if the plan cannot be resolved.
+      }
     }
 
     notifyListeners();
   }
 
-  void updateCartItemDiscount(String productId, double discount) {
-    final index = _cartItems.indexWhere((item) => item.product.id == productId);
+  void updateCartItemDiscount(String lineId, double discount) {
+    final index = _cartItems.indexWhere((item) => item.id == lineId);
     if (index >= 0) {
       _cartItems[index].discount = discount;
       notifyListeners();
@@ -196,17 +246,25 @@ class SalesProvider extends ChangeNotifier {
       // batch prices and costs.
       final saleItems = <SaleItem>[];
       for (final item in _cartItems) {
-        final plan = await _dbService.getFifoPlan(item.product, item.quantity);
+        final plan =
+            await _dbService.getFifoPlan(item.product, item.stockQuantity);
+        // FIFO gives the cost of a whole box; a loose line records the cost of
+        // the single piece it actually took.
+        final costPerUnit = item.loose && item.piecesPerBox > 0
+            ? plan.weightedCost / item.piecesPerBox
+            : plan.weightedCost;
         saleItems.add(SaleItem(
           productId: item.product.id,
           productName: item.product.name,
-          price: plan.effectivePrice,
+          price: item.unitPrice,
           quantity: item.quantity,
           discount: item.discount,
-          costPrice: plan.weightedCost,
+          costPrice: costPerUnit,
           batchNumber: plan.batchLabel,
           barcode: item.product.barcode,
           allocations: plan.allocations,
+          loose: item.loose,
+          piecesPerBox: item.piecesPerBox,
         ));
       }
 
@@ -233,6 +291,10 @@ class SalesProvider extends ChangeNotifier {
 
       // Save the sale and deduct stock (FIFO) atomically.
       await _dbService.completeSale(sale, List<CartItem>.from(_cartItems));
+
+      // Keep this bill out of the LAN stock delta: the queue below already
+      // moves the server's stock, so forwarding it again would double-count.
+      unawaited(StockSync.noteLocalSale(_cartItems));
 
       _lastSale = sale;
 

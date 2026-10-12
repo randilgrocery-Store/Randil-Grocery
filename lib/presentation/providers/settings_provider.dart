@@ -106,4 +106,24 @@ class SettingsProvider extends ChangeNotifier {
       ),
     );
   }
+
+  Future<void> updateScaleBarcodeSettings({
+    bool? enabled,
+    String? prefix,
+    int? length,
+    int? itemLength,
+    bool? priceMode,
+    bool? checkDigit,
+  }) async {
+    await updateSettings(
+      _settings.copyWith(
+        scaleBarcodeEnabled: enabled,
+        scaleBarcodePrefix: prefix,
+        scaleBarcodeLength: length,
+        scaleBarcodeItemLength: itemLength,
+        scaleBarcodePriceMode: priceMode,
+        scaleBarcodeCheckDigit: checkDigit,
+      ),
+    );
+  }
 }

@@ -81,6 +81,16 @@ class CategoryProvider extends ChangeNotifier {
     }
   }
 
+  /// Case-insensitive lookup by name, used to find reserved categories such as
+  /// the shopping-bag category.
+  Category? getCategoryByName(String name) {
+    final target = name.trim().toLowerCase();
+    for (final category in _categories) {
+      if (category.name.trim().toLowerCase() == target) return category;
+    }
+    return null;
+  }
+
   String getCategoryName(String id) {
     final category = getCategoryById(id);
     return category?.name ?? 'Unknown';

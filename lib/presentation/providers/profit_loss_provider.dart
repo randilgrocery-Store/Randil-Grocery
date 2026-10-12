@@ -12,6 +12,22 @@ class ProfitLossProvider extends ChangeNotifier {
   bool _loading = false;
   DateTime? _rangeStart;
   DateTime? _rangeEnd;
+  bool _disposed = false;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  /// A refresh can still be in flight when the owning dashboard is torn down
+  /// (window close, hot restart, or the widget test teardown). Notifying a
+  /// disposed [ChangeNotifier] throws, so every async notify is guarded.
+  void _safeNotify() {
+    if (!_disposed) {
+      notifyListeners();
+    }
+  }
 
   Map<String, dynamic>? get data => _data;
   bool get loading => _loading;
@@ -47,7 +63,7 @@ class ProfitLossProvider extends ChangeNotifier {
       return;
     }
     _loading = true;
-    notifyListeners();
+    _safeNotify();
     try {
       _data = await _dbService.getBusinessProfitLoss(start, end);
       _rangeStart = start;
@@ -56,7 +72,7 @@ class ProfitLossProvider extends ChangeNotifier {
       _data = null;
     } finally {
       _loading = false;
-      notifyListeners();
+      _safeNotify();
     }
   }
 

@@ -67,11 +67,12 @@ class ProfitLossPanel extends StatelessWidget {
                     _sectionLabel(context, 'Money In', Icons.savings_outlined,
                         _green),
                     _line(context, 'Sales revenue', pl.d('revenue'),
-                        hint: '${pl.i('bills')} bills'),
-                    _line(context, 'Discounts (already deducted at billing)', -pl.d('discounts'),
-                        negative: true, muted: true),
-                    _line(context, 'Net sales taken', pl.d('revenue') - pl.d('discounts'),
-                        bold: true),
+                        hint: '${pl.i('bills')} bills • '
+                            '${_rs(pl.d('discounts'))} discounts given'),
+                    _line(context, 'Reload profit', pl.d('reloadProfit'),
+                        hint: '${pl.i('reloadSoldCount')} reload sales • '
+                            '${_rs(pl.d('reloadSoldValue'))} sold',
+                        icon: Icons.sim_card_outlined),
                     _line(context, 'Cash / Card',
                         0,
                         hint: 'Cash ${_rs(pl.d('cashSales'))}  •  '
@@ -92,7 +93,7 @@ class ProfitLossPanel extends StatelessWidget {
                         negative: true,
                         hint: '${pl.i('wastageCount')} entries • '
                             '${_qty(pl.d('wastageUnits'))} units'),
-                    _line(context, 'Refunds (already deducted from sales)', -pl.d('refundLoss'),
+                    _line(context, 'Refunds paid out', -pl.d('refundLoss'),
                         negative: true,
                         hint: pl.d('refundPending') > 0
                             ? '${pl.i('refundCount')} paid • '
@@ -117,6 +118,14 @@ class ProfitLossPanel extends StatelessWidget {
                         hint: 'Cash ${_rs(pl.d('supplierPaidCash'))} • '
                             'Cheque ${_rs(pl.d('supplierPaidCheque'))}',
                         icon: Icons.payments_outlined),
+                    _line(
+                      context,
+                      'Returned to suppliers',
+                      pl.d('supplierReturnsValue'),
+                      hint: '${pl.i('supplierReturnsCount')} returns — money '
+                          'credited back',
+                      icon: Icons.assignment_return_outlined,
+                    ),
                     _line(context, 'Still owed to suppliers',
                         pl.d('supplierOutstanding'),
                         hint: 'Outstanding balance',
@@ -458,6 +467,15 @@ class ProfitLossPanel extends StatelessWidget {
         caption: pl.d('refundPending') > 0
             ? '${_rs(pl.d('refundPending'))} awaiting payout'
             : '${pl.i('refundCount')} refunds paid',
+      ),
+      _tile(
+        context,
+        icon: Icons.sim_card_outlined,
+        color: pl.d('reloadProfit') >= 0 ? _green : _red,
+        title: 'Reload',
+        value: _rs(pl.d('reloadProfit')),
+        caption: '${pl.i('reloadSoldCount')} sales • '
+            '${_rs(pl.d('reloadSoldValue'))} sold',
       ),
       _tile(
         context,

@@ -6,9 +6,11 @@ import '../../../data/models/expense.dart';
 import '../../../data/models/sale.dart';
 import '../../../data/services/print_service.dart';
 import '../../providers/expense_provider.dart';
+import '../../providers/network_provider.dart';
 import '../../providers/reports_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../widgets/custom_widgets.dart';
+import 'history_reports_panel.dart';
 
 class ReportsScreen extends StatefulWidget {
   const ReportsScreen({super.key});
@@ -23,6 +25,10 @@ class _ReportsScreenState extends State<ReportsScreen> {
   late int _selectedMonth;
   Map<String, dynamic>? _profitReport;
 
+  NetworkProvider? _network;
+  int _lastSaleTick = 0;
+  int _lastFinancialTick = 0;
+
   @override
   void initState() {
     super.initState();
@@ -31,6 +37,41 @@ class _ReportsScreenState extends State<ReportsScreen> {
     _selectedYear = now.year;
     _selectedMonth = now.month;
     _loadReports();
+    _watchForRemoteSales();
+  }
+
+  /// Reloads the figures whenever another terminal pushes a sale into this
+  /// PC's server, or whenever mirrored billing arrives. Without this the profit
+  /// report only refreshed when the user reopened the screen, so it looked like
+  /// sales "weren't" happening.
+  void _watchForRemoteSales() {
+    final network = context.read<NetworkProvider>();
+    _network = network;
+    _lastSaleTick = network.remoteSaleTick;
+    _lastFinancialTick = network.financialTick;
+    network.addListener(_onNetworkTick);
+  }
+
+  void _onNetworkTick() {
+    if (!mounted || _network == null) return;
+    final saleTick = _network!.remoteSaleTick;
+    final financialTick = _network!.financialTick;
+    if (saleTick == _lastSaleTick && financialTick == _lastFinancialTick) {
+      return;
+    }
+    _lastSaleTick = saleTick;
+    _lastFinancialTick = financialTick;
+    // Deferred past the current frame: notifyListeners() can arrive while the
+    // tree is building, and _loadProfitReport finishes in setState().
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _loadReports();
+    });
+  }
+
+  @override
+  void dispose() {
+    _network?.removeListener(_onNetworkTick);
+    super.dispose();
   }
 
   Future<void> _loadReports() async {
@@ -304,6 +345,10 @@ class _ReportsScreenState extends State<ReportsScreen> {
       ..writeln(money('Cost of Goods (COGS)', report['totalCogs'] as num))
       ..writeln(money('Expenses', report['totalExpenses'] as num))
       ..writeln(money('Wastage Loss', report['totalWastage'] as num))
+      ..writeln(money('Refunds Paid', report['totalRefunds'] as num))
+      ..writeln(money('Reload Profit', report['reloadProfit'] as num))
+      ..writeln(money('Returns to Suppliers',
+          report['totalSupplierReturns'] as num? ?? 0))
       ..writeln('-' * cols)
       ..writeln(money('Net Profit', report['netProfit'] as num))
       ..writeln('=' * cols)
@@ -337,7 +382,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
 
   @override
   Widget build(BuildContext context) => DefaultTabController(
-        length: 3,
+        length: 4,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -357,10 +402,12 @@ class _ReportsScreenState extends State<ReportsScreen> {
                   border: Border.all(color: PosAppTheme.borderGray),
                 ),
                 child: const TabBar(
+                  isScrollable: true,
                   tabs: [
                     Tab(text: 'Daily Report'),
                     Tab(text: 'Monthly Report'),
                     Tab(text: 'Profit & Expenses'),
+                    Tab(text: 'History Reports'),
                   ],
                   labelColor: PosAppTheme.primaryGreen,
                   indicatorColor: PosAppTheme.primaryGreen,
@@ -376,6 +423,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
                     _buildMonthlyReport(),
                     // Profit & Expenses
                     _buildProfitReport(),
+                    // Expired items, reload history, wastage and expenses
+                    const HistoryReportsPanel(),
                   ],
                 ),
               ),
@@ -786,6 +835,27 @@ class _ReportsScreenState extends State<ReportsScreen> {
                         value:
                             'Rs. ${(_profitReport!['totalWastage'] as num).toStringAsFixed(2)}',
                         color: PosAppTheme.dangerRed,
+                      ),
+                      StatCard(
+                        icon: Icons.assignment_return,
+                        label: 'Refunds Paid',
+                        value:
+                            'Rs. ${(_profitReport!['totalRefunds'] as num).toStringAsFixed(2)}',
+                        color: PosAppTheme.warningOrange,
+                      ),
+                      StatCard(
+                        icon: Icons.sim_card_outlined,
+                        label: 'Reload Profit',
+                        value:
+                            'Rs. ${(_profitReport!['reloadProfit'] as num).toStringAsFixed(2)}',
+                        color: PosAppTheme.successGreen,
+                      ),
+                      StatCard(
+                        icon: Icons.assignment_return_outlined,
+                        label: 'Returns to Suppliers',
+                        value:
+                            'Rs. ${((_profitReport!['totalSupplierReturns'] as num?) ?? 0).toStringAsFixed(2)}',
+                        color: PosAppTheme.primaryGreen,
                       ),
                       StatCard(
                         icon: Icons.trending_down,

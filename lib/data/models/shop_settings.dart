@@ -25,6 +25,12 @@ class ShopSettings {
     this.cashDrawerPulseOffMs = 240,
     this.cashDrawerPrinterName = '',
     this.cashDrawerOpenOnCardOnly = true,
+    this.scaleBarcodeEnabled = false,
+    this.scaleBarcodePrefix = '2',
+    this.scaleBarcodeLength = 12,
+    this.scaleBarcodeItemLength = 5,
+    this.scaleBarcodePriceMode = false,
+    this.scaleBarcodeCheckDigit = true,
     DateTime? updatedAt,
   }) : updatedAt = updatedAt ?? DateTime.now();
 
@@ -53,6 +59,12 @@ class ShopSettings {
       cashDrawerPulseOffMs: map['cashDrawerPulseOffMs'] as int? ?? 240,
       cashDrawerPrinterName: map['cashDrawerPrinterName'] as String? ?? '',
       cashDrawerOpenOnCardOnly: (map['cashDrawerOpenOnCardOnly'] as int?) != 0,
+      scaleBarcodeEnabled: (map['scaleBarcodeEnabled'] as int?) == 1,
+      scaleBarcodePrefix: map['scaleBarcodePrefix'] as String? ?? '2',
+      scaleBarcodeLength: map['scaleBarcodeLength'] as int? ?? 12,
+      scaleBarcodeItemLength: map['scaleBarcodeItemLength'] as int? ?? 5,
+      scaleBarcodePriceMode: (map['scaleBarcodePriceMode'] as int?) == 1,
+      scaleBarcodeCheckDigit: (map['scaleBarcodeCheckDigit'] as int?) != 0,
       updatedAt: DateTime.parse(map['updatedAt'] as String),
     );
   final String shopName;
@@ -79,6 +91,13 @@ class ShopSettings {
   final int cashDrawerPulseOffMs;
   final String cashDrawerPrinterName; // empty = use billing printer
   final bool cashDrawerOpenOnCardOnly;
+  // --- Label-printing scale barcode decoding (see services/scale_barcode.dart)
+  final bool scaleBarcodeEnabled;
+  final String scaleBarcodePrefix;
+  final int scaleBarcodeLength;
+  final int scaleBarcodeItemLength;
+  final bool scaleBarcodePriceMode; // false = weight (grams), true = price
+  final bool scaleBarcodeCheckDigit;
   final DateTime updatedAt;
 
   ShopSettings copyWith({
@@ -106,6 +125,12 @@ class ShopSettings {
     int? cashDrawerPulseOffMs,
     String? cashDrawerPrinterName,
     bool? cashDrawerOpenOnCardOnly,
+    bool? scaleBarcodeEnabled,
+    String? scaleBarcodePrefix,
+    int? scaleBarcodeLength,
+    int? scaleBarcodeItemLength,
+    bool? scaleBarcodePriceMode,
+    bool? scaleBarcodeCheckDigit,
   }) => ShopSettings(
       shopName: shopName ?? this.shopName,
       address: address ?? this.address,
@@ -136,6 +161,15 @@ class ShopSettings {
           cashDrawerPrinterName ?? this.cashDrawerPrinterName,
         cashDrawerOpenOnCardOnly:
           cashDrawerOpenOnCardOnly ?? this.cashDrawerOpenOnCardOnly,
+        scaleBarcodeEnabled: scaleBarcodeEnabled ?? this.scaleBarcodeEnabled,
+        scaleBarcodePrefix: scaleBarcodePrefix ?? this.scaleBarcodePrefix,
+        scaleBarcodeLength: scaleBarcodeLength ?? this.scaleBarcodeLength,
+        scaleBarcodeItemLength:
+          scaleBarcodeItemLength ?? this.scaleBarcodeItemLength,
+        scaleBarcodePriceMode:
+          scaleBarcodePriceMode ?? this.scaleBarcodePriceMode,
+        scaleBarcodeCheckDigit:
+          scaleBarcodeCheckDigit ?? this.scaleBarcodeCheckDigit,
     );
 
   Map<String, dynamic> toMap() => {
@@ -163,6 +197,12 @@ class ShopSettings {
       'cashDrawerPulseOffMs': cashDrawerPulseOffMs,
       'cashDrawerPrinterName': cashDrawerPrinterName,
       'cashDrawerOpenOnCardOnly': cashDrawerOpenOnCardOnly ? 1 : 0,
+      'scaleBarcodeEnabled': scaleBarcodeEnabled ? 1 : 0,
+      'scaleBarcodePrefix': scaleBarcodePrefix,
+      'scaleBarcodeLength': scaleBarcodeLength,
+      'scaleBarcodeItemLength': scaleBarcodeItemLength,
+      'scaleBarcodePriceMode': scaleBarcodePriceMode ? 1 : 0,
+      'scaleBarcodeCheckDigit': scaleBarcodeCheckDigit ? 1 : 0,
       'updatedAt': updatedAt.toIso8601String(),
     };
 }

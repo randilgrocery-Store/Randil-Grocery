@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -37,13 +39,24 @@ class AppTopBar extends StatefulWidget {
 }
 
 class _AppTopBarState extends State<AppTopBar> {
-  /// Expiring batches, loaded once (0 = nothing loaded yet, [] = none found).
+  /// Expiring batches (null = not loaded yet, [] = none found).
   List<ProductBatch>? _expiring;
+  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
     _loadExpiringBatches();
+    // Keep the bell current without a restart: a GRN, a sale, or a LAN sync
+    // pull is reflected within half a minute.
+    _refreshTimer =
+        Timer.periodic(const Duration(seconds: 30), (_) => _loadExpiringBatches());
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadExpiringBatches() async {

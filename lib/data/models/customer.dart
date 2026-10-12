@@ -11,11 +11,13 @@ class Customer {
     this.totalTransactions = 0,
     DateTime? createdAt,
     DateTime? lastPurchaseDate,
+    DateTime? updatedAt,
     this.isActive = true,
   })  : email = email ?? '',
         id = id ?? const Uuid().v4(),
         createdAt = createdAt ?? DateTime.now(),
-        lastPurchaseDate = lastPurchaseDate ?? DateTime.now();
+        lastPurchaseDate = lastPurchaseDate ?? DateTime.now(),
+        updatedAt = updatedAt ?? DateTime.now();
 
   factory Customer.fromMap(Map<String, dynamic> map) => Customer(
         id: map['id'] as String,
@@ -29,6 +31,10 @@ class Customer {
         totalTransactions: map['totalTransactions'] as int,
         createdAt: DateTime.parse(map['createdAt'] as String),
         lastPurchaseDate: DateTime.parse(map['lastPurchaseDate'] as String),
+        updatedAt: map['updatedAt'] != null &&
+                (map['updatedAt'] as String).isNotEmpty
+            ? DateTime.parse(map['updatedAt'] as String)
+            : DateTime.parse(map['lastPurchaseDate'] as String),
         isActive: (map['isActive'] as int) == 1,
       );
   final String id;
@@ -40,6 +46,9 @@ class Customer {
   final int totalTransactions;
   final DateTime createdAt;
   final DateTime lastPurchaseDate;
+
+  /// Last time any field changed — the LAN mirror's clock for this row.
+  final DateTime updatedAt;
   final bool isActive;
 
   Customer copyWith({
@@ -50,6 +59,7 @@ class Customer {
     double? totalSpent,
     int? totalTransactions,
     DateTime? lastPurchaseDate,
+    DateTime? updatedAt,
     bool? isActive,
   }) =>
       Customer(
@@ -62,6 +72,7 @@ class Customer {
         totalTransactions: totalTransactions ?? this.totalTransactions,
         createdAt: createdAt,
         lastPurchaseDate: lastPurchaseDate ?? this.lastPurchaseDate,
+        updatedAt: updatedAt ?? this.updatedAt,
         isActive: isActive ?? this.isActive,
       );
 
@@ -75,6 +86,7 @@ class Customer {
         'totalTransactions': totalTransactions,
         'createdAt': createdAt.toIso8601String(),
         'lastPurchaseDate': lastPurchaseDate.toIso8601String(),
+        'updatedAt': updatedAt.toIso8601String(),
         'isActive': isActive ? 1 : 0,
       };
 

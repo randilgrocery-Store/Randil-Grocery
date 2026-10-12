@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../../data/models/reload_card.dart';
+import '../../../data/models/user.dart';
 import '../../components/app_card.dart';
 import '../../components/kpi_card.dart';
 import '../../components/section_header.dart';
 import '../../components/status_badge.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/reload_card_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../theme/app_colors.dart';
@@ -229,6 +231,8 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
   @override
   Widget build(BuildContext context) {
     final t = context.typography;
+    final isAdmin = context.read<AuthProvider>().currentUser?.role ==
+        UserRole.admin;
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -255,25 +259,27 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                 children: [
                   LayoutBuilder(
                     builder: (context, constraints) {
-                      final cardW = (constraints.maxWidth - 48) / 4;
+                      final cardW = (constraints.maxWidth - 48) / (isAdmin ? 4 : 2);
                       return Wrap(
                         spacing: 16,
                         runSpacing: 16,
                         children: [
-                          SizedBox(
-                            width: cardW,
-                            child: KpiCard(
-                              label: 'Bought',
-                              value: AppMoney.format(provider.totalBoughtValue),
-                              icon: Icons.add_shopping_cart,
-                              tone: StatusTone.primary,
-                              secondary: Text(
-                                '${provider.boughtCount} purchase'
-                                '${provider.boughtCount == 1 ? '' : 's'}',
-                                style: t.caption,
+                          if (isAdmin) ...[
+                            SizedBox(
+                              width: cardW,
+                              child: KpiCard(
+                                label: 'Bought',
+                                value: AppMoney.format(provider.totalBoughtValue),
+                                icon: Icons.add_shopping_cart,
+                                tone: StatusTone.primary,
+                                secondary: Text(
+                                  '${provider.boughtCount} purchase'
+                                  '${provider.boughtCount == 1 ? '' : 's'}',
+                                  style: t.caption,
+                                ),
                               ),
                             ),
-                          ),
+                          ],
                           SizedBox(
                             width: cardW,
                             child: KpiCard(
@@ -303,23 +309,25 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                               ),
                             ),
                           ),
-                          SizedBox(
-                            width: cardW,
-                            child: KpiCard(
-                              label: 'Profit',
-                              value: AppMoney.format(provider.totalProfit),
-                              icon: Icons.trending_up,
-                              tone: provider.totalProfit >= 0
-                                  ? StatusTone.success
-                                  : StatusTone.danger,
-                              secondary: Text(
-                                provider.totalPurchaseCost > 0
-                                    ? 'on ${AppMoney.format(provider.totalSoldValue)} sold'
-                                    : 'no reload sold yet',
-                                style: t.caption,
+                          if (isAdmin) ...[
+                            SizedBox(
+                              width: cardW,
+                              child: KpiCard(
+                                label: 'Profit',
+                                value: AppMoney.format(provider.totalProfit),
+                                icon: Icons.trending_up,
+                                tone: provider.totalProfit >= 0
+                                    ? StatusTone.success
+                                    : StatusTone.danger,
+                                secondary: Text(
+                                  provider.totalPurchaseCost > 0
+                                      ? 'on ${AppMoney.format(provider.totalSoldValue)} sold'
+                                      : 'no reload sold yet',
+                                  style: t.caption,
+                                ),
                               ),
                             ),
-                          ),
+                          ],
                         ],
                       );
                     },
@@ -336,12 +344,14 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                           onPressed: _sellDialog,
                           icon: Icons.sell,
                         ),
-                        const SizedBox(width: 8),
-                        GroceryButton(
-                          label: 'Buy Reload',
-                          onPressed: _buyDialog,
-                          icon: Icons.add,
-                        ),
+                        if (isAdmin) ...[
+                          const SizedBox(width: 8),
+                          GroceryButton(
+                            label: 'Buy Reload',
+                            onPressed: _buyDialog,
+                            icon: Icons.add,
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -354,11 +364,14 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                       ),
                     )
                   else if (provider.cards.isEmpty)
-                    const EmptyState(
+                    EmptyState(
                       icon: Icons.sim_card,
                       title: 'No reload yet',
-                      message: 'Press "Buy Reload" to record reload bought from '
-                          'the ISP, then "Sell Reload" when a customer tops up.',
+                      message: isAdmin
+                          ? 'Press "Buy Reload" to record reload bought from '
+                              'the ISP, then "Sell Reload" when a customer tops up.'
+                          : 'No reload available to sell yet — ask the admin '
+                              'to buy reload stock.',
                     )
                   else
                     Expanded(
@@ -366,8 +379,11 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                         itemCount: provider.cards.length,
                         separatorBuilder: (context, index) =>
                             const SizedBox(height: 6),
-                        itemBuilder: (context, i) =>
-                            _TransactionTile(card: provider.cards[i], provider: provider),
+                        itemBuilder: (context, i) => _TransactionTile(
+                          card: provider.cards[i],
+                          provider: provider,
+                          isAdmin: isAdmin,
+                        ),
                       ),
                     ),
                 ],
@@ -381,10 +397,15 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
 }
 
 class _TransactionTile extends StatelessWidget {
-  const _TransactionTile({required this.card, required this.provider});
+  const _TransactionTile({
+    required this.card,
+    required this.provider,
+    required this.isAdmin,
+  });
 
   final ReloadCard card;
   final ReloadCardProvider provider;
+  final bool isAdmin;
 
   @override
   Widget build(BuildContext context) {
@@ -424,7 +445,9 @@ class _TransactionTile extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   isBuy
-                      ? '${AppMoney.format(card.value)} reload · ${AppMoney.format(card.cost)} paid'
+                      ? (isAdmin
+                          ? '${AppMoney.format(card.value)} reload · ${AppMoney.format(card.cost)} paid'
+                          : '${AppMoney.format(card.value)} reload bought')
                       : '${AppMoney.format(card.value)} to '
                           '${card.customerName ?? card.customerPhone ?? 'customer'}',
                   style: t.caption,
@@ -433,7 +456,7 @@ class _TransactionTile extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          if (!isBuy)
+          if (!isBuy && isAdmin)
             StatusBadge(
               label: 'Profit ${AppMoney.format(card.value - card.cost)}',
               tone: card.value - card.cost >= 0
@@ -441,11 +464,12 @@ class _TransactionTile extends StatelessWidget {
                   : StatusTone.danger,
               dense: true,
             ),
-          IconButton(
-            tooltip: 'Delete this record',
-            icon: const Icon(Icons.delete_outline, size: 18),
-            onPressed: () => _confirmDelete(context),
-          ),
+          if (isAdmin)
+            IconButton(
+              tooltip: 'Delete this record',
+              icon: const Icon(Icons.delete_outline, size: 18),
+              onPressed: () => _confirmDelete(context),
+            ),
         ],
       ),
     );

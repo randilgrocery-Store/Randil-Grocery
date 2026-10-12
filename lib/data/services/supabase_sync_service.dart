@@ -331,6 +331,8 @@ class SupabaseSyncService {
         'cost': p.buyingPrice,
         'stock': p.quantity,
         'unit': p.soldByWeight ? 'kg' : '',
+        'pieces_per_box': p.piecesPerBox,
+        'single_price': p.singlePrice,
         'low_stock_threshold': p.reorderLevel ?? 0,
         'updated_at': p.updatedAt.toUtc().toIso8601String(),
       };

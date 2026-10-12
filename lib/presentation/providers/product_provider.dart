@@ -13,6 +13,12 @@ class ProductProvider extends ChangeNotifier {
   bool _isLoading = false;
   String _sortBy = 'name'; // 'name', 'category', 'barcode', 'price', 'stock'
 
+  /// productId -> (soonest *future* expiry, newest expiry) across that
+  /// product's stocked batches. Rebuilt with every [loadProducts] so the POS
+  /// grid reflects real batch expiry (the product-level `expiryDate` column
+  /// is never set by Inventory).
+  Map<String, (DateTime?, DateTime?)> _expirySignals = {};
+
   bool get hasActiveFilters =>
       _searchQuery.trim().isNotEmpty || _selectedCategory != 'All';
   List<Product> get products =>
@@ -23,6 +29,16 @@ class ProductProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String get sortBy => _sortBy;
 
+  /// Soonest *future* expiry for [productId], or null when the product has no
+  /// batch carrying a future expiry date. Drives the POS "Exp: X days" badge.
+  DateTime? soonestExpiryFor(String productId) =>
+      _expirySignals[productId]?.$1;
+
+  /// Newest expiry of any stocked lot for [productId]. When this is already
+  /// in the past, every remaining lot is expired.
+  DateTime? latestExpiryFor(String productId) =>
+      _expirySignals[productId]?.$2;
+
   Future<void> loadProducts() async {
     _isLoading = true;
     notifyListeners();
@@ -30,6 +46,12 @@ class ProductProvider extends ChangeNotifier {
       _products = await _dbService.getAllProducts();
       _updateCategories();
       _applyFiltersAndSort(notify: false);
+      try {
+        _expirySignals = await _dbService.getBatchExpirySignals();
+      } catch (e) {
+        debugPrint('Error loading batch expiry: $e');
+        _expirySignals = {};
+      }
     } catch (e) {
       debugPrint('Error loading products: $e');
       _products = [];
@@ -89,6 +111,11 @@ class ProductProvider extends ChangeNotifier {
 
   Future<Product?> getProductByBarcode(String barcode) async =>
       _dbService.getProductByBarcode(barcode);
+
+  /// Leading-zero-tolerant barcode lookup used by scale labels, where the item
+  /// code on the label and the product barcode may differ only in leading zeros.
+  Future<Product?> getProductByBarcodeLoose(String code) async =>
+      _dbService.getProductByBarcodeLoose(code);
 
   /// Looks a product up by barcode, and falls back to its exact name / item
   /// code. Used by the POS scanner so any code the scanner sends works.

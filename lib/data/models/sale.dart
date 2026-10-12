@@ -15,6 +15,8 @@ class SaleItem {
     this.barcode = '',
     String? id,
     this.allocations = const [],
+    this.loose = false,
+    this.piecesPerBox = 1,
   }) : id = id ?? const Uuid().v4();
 
   factory SaleItem.fromMap(Map<String, dynamic> map) {
@@ -37,6 +39,8 @@ class SaleItem {
                   Map<String, dynamic>.from(e as Map)))
               .toList()
           : const [],
+      loose: map['loose'] == true,
+      piecesPerBox: (map['piecesPerBox'] as num?)?.toInt() ?? 1,
     );
   }
   final String id;
@@ -60,6 +64,19 @@ class SaleItem {
   /// the right stock back into the right batch when the line is refunded.
   final List<BatchAllocation> allocations;
 
+  /// True when this line sold loose single pieces taken from the box rather
+  /// than whole boxes (see [Product.piecesPerBox]).
+  final bool loose;
+
+  /// Pieces per box, captured at sale time, so the same fraction of a box is
+  /// deducted on the server PC and restored on a refund.
+  final int piecesPerBox;
+
+  /// How much this line took off the product's stock, in the product's stock
+  /// unit (boxes). A loose line takes `quantity / piecesPerBox` of a box.
+  double get stockQuantity =>
+      loose && piecesPerBox > 0 ? quantity / piecesPerBox : quantity;
+
   double get subtotal => price * quantity;
   double get discountAmount => (subtotal * discount) / 100;
   double get total => subtotal - discountAmount;
@@ -76,6 +93,8 @@ class SaleItem {
       'batchNumber': batchNumber,
       'barcode': barcode,
       'allocations': allocations.map((e) => e.toMap()).toList(),
+      'loose': loose,
+      'piecesPerBox': piecesPerBox,
     };
 }
 

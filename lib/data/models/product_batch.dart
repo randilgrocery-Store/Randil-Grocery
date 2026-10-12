@@ -14,6 +14,7 @@ class ProductBatch {
     this.notes = '',
     DateTime? createdAt,
     double? initialQuantity,
+    this.updatedAt,
   })  : id = id ?? const Uuid().v4(),
         sellingPrice = sellingPrice ?? 0,
         receivedDate = receivedDate ?? DateTime.now(),
@@ -39,6 +40,9 @@ class ProductBatch {
         supplierId: map['supplierId'] as String,
         notes: map['notes'] as String? ?? '',
         createdAt: DateTime.parse(map['createdAt'] as String),
+        updatedAt: map['updatedAt'] != null && (map['updatedAt'] as String).isNotEmpty
+            ? DateTime.tryParse(map['updatedAt'] as String)
+            : null,
       );
   final String id;
   final String productId;
@@ -59,6 +63,11 @@ class ProductBatch {
   final String supplierId;
   final String notes;
   final DateTime createdAt;
+
+  /// When the batch row was last edited. Powers the LAN mirror: an in-place
+  /// expiry-date edit bumps this stamp so the other PC learns about it (the
+  /// mirror clock is the latest of this, receivedDate and createdAt).
+  final DateTime? updatedAt;
 
   bool get isExpired =>
       expiryDate != null && expiryDate!.isBefore(DateTime.now());
@@ -90,6 +99,7 @@ class ProductBatch {
     String? notes,
     DateTime? createdAt,
     double? initialQuantity,
+    DateTime? updatedAt,
   }) =>
       ProductBatch(
         id: id ?? this.id,
@@ -104,6 +114,7 @@ class ProductBatch {
         notes: notes ?? this.notes,
         createdAt: createdAt ?? this.createdAt,
         initialQuantity: initialQuantity ?? this.initialQuantity,
+        updatedAt: updatedAt ?? this.updatedAt,
       );
 
   Map<String, dynamic> toMap() => {
@@ -119,6 +130,7 @@ class ProductBatch {
         'supplierId': supplierId,
         'notes': notes,
         'createdAt': createdAt.toIso8601String(),
+        'updatedAt': updatedAt?.toIso8601String(),
       };
 
   @override

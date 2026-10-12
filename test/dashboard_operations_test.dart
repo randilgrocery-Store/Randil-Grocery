@@ -140,6 +140,17 @@ void main() {
 
     // Tear the tree down so polling/clock timers are disposed.
     await tester.pumpWidget(const SizedBox.shrink());
+
+    // The tree is gone, but the dashboard's final refresh may still have an
+    // await in flight against the real engine. sqflite's transaction lock uses
+    // a 10s timer that only cancels when that query finishes — so drain REAL
+    // async here or the framework's "no pending timers" invariant trips at the
+    // end of the test (the flaky "Timer is still pending" failure).
+    for (var i = 0; i < 15; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 250)),
+      );
+    }
     await tester.pump(const Duration(milliseconds: 200));
   });
 }

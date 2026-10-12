@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -10,6 +8,7 @@ import '../../../data/models/product.dart';
 import '../../providers/category_provider.dart';
 import '../../providers/product_provider.dart';
 import '../../widgets/custom_widgets.dart';
+import '../../widgets/product_image.dart';
 
 class InventoryScreen extends StatefulWidget {
   const InventoryScreen({super.key});
@@ -444,18 +443,13 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   bottom: BorderSide(color: Colors.grey[300]!),
                 ),
               ),
-              child: product.imagePath != null &&
-                      product.imagePath!.isNotEmpty &&
-                      File(product.imagePath!).existsSync()
-                  ? Image.file(
-                      File(product.imagePath!),
-                      fit: BoxFit.cover,
-                    )
-                  : Icon(
-                      Icons.image_not_supported_outlined,
-                      size: 35,
-                      color: Colors.grey[400],
-                    ),
+              child: ProductImage(
+                path: product.imagePath,
+                fit: BoxFit.cover,
+                placeholderIcon: Icons.image_not_supported_outlined,
+                placeholderColor: Colors.grey[400],
+                placeholderSize: 35,
+              ),
             ),
 
             // Content
@@ -515,7 +509,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             Text(
-                              'Stock: ${fmtQty(product.quantity)}${product.soldByWeight ? ' kg' : ''}',
+                              'Stock: ${product.soldByWeight ? '${fmtQty(product.quantity)} kg' : product.stockLabel(product.quantity)}',
                               style: TextStyle(
                                 fontSize: responsive.bodySmall,
                                 color: isOutOfStock
@@ -590,6 +584,24 @@ class _InventoryScreenState extends State<InventoryScreen> {
     );
   }
 
+  /// Makes sure [value] is a filename inside the app's image folder, so the
+  /// path keeps working after moving to another PC (raw picked paths and old
+  /// absolute paths from earlier builds are copied in on first save).
+  Future<String?> _normalizeImagePath(String? value) async {
+    if (value == null || value.trim().isEmpty) return null;
+    final v = value.trim();
+    // Already a bare filename in the image folder.
+    if (!v.contains(':') && !v.contains('\\') && !v.contains('/')) return v;
+    final resolved = ProductImageStore.resolve(v);
+    if (resolved == null) return null; // Picture is gone — drop the reference.
+    // Already inside our folder: only the name matters from here on.
+    if (resolved.startsWith(ProductImageStore.directory().path)) {
+      return resolved.split(RegExp(r'[/\\]')).last;
+    }
+    final stored = await ProductImageStore.store(resolved);
+    return stored ?? resolved;
+  }
+
   void _showAddProductDialog() {
     _showProductDialog(title: 'Add Product');
   }
@@ -619,6 +631,16 @@ class _InventoryScreenState extends State<InventoryScreen> {
       text: isEdit ? fmtQty(existingProduct.quantity) : '',
     );
     bool soldByWeight = isEdit ? existingProduct.soldByWeight : false;
+    // Break-bulk: one box (the only barcoded item) that is also sold as loose
+    // single pieces. Left at 1 the product behaves exactly as before.
+    final piecesPerBoxCtrl = TextEditingController(
+      text: isEdit ? '${existingProduct.piecesPerBox ?? 1}' : '1',
+    );
+    final singlePriceCtrl = TextEditingController(
+      text: isEdit && (existingProduct.singlePrice ?? 0) > 0
+          ? '${existingProduct.singlePrice}'
+          : '',
+    );
 
     showDialog(
       context: context,
@@ -646,18 +668,14 @@ class _InventoryScreenState extends State<InventoryScreen> {
                             borderRadius: BorderRadius.circular(8),
                             color: Colors.grey[100],
                           ),
-                          child: selectedImagePath != null &&
-                                  selectedImagePath!.isNotEmpty &&
-                                  File(selectedImagePath!).existsSync()
-                              ? Image.file(
-                                  File(selectedImagePath!),
-                                  fit: BoxFit.cover,
-                                )
-                              : Icon(
-                                  Icons.image_not_supported_outlined,
-                                  size: 50,
-                                  color: Colors.grey[400],
-                                ),
+                          child: ProductImage(
+                            path: selectedImagePath,
+                            fit: BoxFit.cover,
+                            placeholderIcon:
+                                Icons.image_not_supported_outlined,
+                            placeholderColor: Colors.grey[400],
+                            placeholderSize: 50,
+                          ),
                         ),
                         const SizedBox(height: 12),
                         ElevatedButton.icon(
@@ -668,8 +686,15 @@ class _InventoryScreenState extends State<InventoryScreen> {
                             );
                             if (result != null &&
                                 result.files.single.path != null) {
+                              // Copy the picture into the app's own folder so
+                              // the saved path is portable (and can be served
+                              // to other machines on the LAN).
+                              final source = result.files.single.path!;
+                              final stored =
+                                  await ProductImageStore.store(source);
+                              if (!mounted) return;
                               setState(() {
-                                selectedImagePath = result.files.single.path;
+                                selectedImagePath = stored ?? source;
                               });
                             }
                           },
@@ -780,6 +805,45 @@ class _InventoryScreenState extends State<InventoryScreen> {
                     value: soldByWeight,
                     onChanged: (v) => setState(() => soldByWeight = v),
                   ),
+                  const Divider(height: 20),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Sold loose from a box (break bulk)',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const Text(
+                    'For cigarettes, cheese and similar items where only the box has a barcode. '
+                    'Stock is kept in boxes; at the counter the box barcode can be sold as a whole box or as single pieces.',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: GroceryTextField(
+                          label: 'Pieces per box',
+                          controller: piecesPerBoxCtrl,
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: GroceryTextField(
+                          label: 'Single piece price',
+                          controller: singlePriceCtrl,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const Text(
+                    'Pieces per box: 1 means the item is not sold loose. The selling price above is the price of one whole box.',
+                    style: TextStyle(fontSize: 11, color: Colors.black54),
+                  ),
                 ],
               ),
             ),
@@ -816,6 +880,11 @@ class _InventoryScreenState extends State<InventoryScreen> {
                   final buyingPrice = double.parse(buyingPriceText);
                   final sellingPrice = double.parse(sellingPriceText);
                   final quantity = double.parse(quantityText);
+                  final piecesPerBox =
+                      (int.tryParse(piecesPerBoxCtrl.text.trim()) ?? 1)
+                          .clamp(1, 100000);
+                  final singlePrice =
+                      double.tryParse(singlePriceCtrl.text.trim()) ?? 0;
 
                   if (buyingPrice < 0 || sellingPrice < 0 || quantity < 0) {
                     showTopSnackBar(context, 
@@ -848,6 +917,9 @@ class _InventoryScreenState extends State<InventoryScreen> {
                     }
                   }
 
+                  final savedImagePath =
+                      await _normalizeImagePath(selectedImagePath);
+
                   if (isEdit) {
                     await productProvider.updateProduct(
                       existingProduct.copyWith(
@@ -857,8 +929,10 @@ class _InventoryScreenState extends State<InventoryScreen> {
                         buyingPrice: buyingPrice,
                         sellingPrice: sellingPrice,
                         quantity: quantity,
-                        imagePath: selectedImagePath,
+                        imagePath: savedImagePath,
                         soldByWeight: soldByWeight,
+                        piecesPerBox: piecesPerBox,
+                        singlePrice: singlePrice,
                       ),
                     );
                   } else {
@@ -869,8 +943,10 @@ class _InventoryScreenState extends State<InventoryScreen> {
                       buyingPrice: buyingPrice,
                       sellingPrice: sellingPrice,
                       quantity: quantity,
-                      imagePath: selectedImagePath,
+                      imagePath: savedImagePath,
                       soldByWeight: soldByWeight,
+                      piecesPerBox: piecesPerBox,
+                      singlePrice: singlePrice,
                     );
                     await productProvider.addProduct(newProduct);
                   }
@@ -983,7 +1059,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                 const SizedBox(height: 8),
                 _buildDetailRow(
                   'Current Stock',
-                  '${fmtQty(product.quantity)} ${product.soldByWeight ? 'kg' : 'units'}',
+                  '${product.soldByWeight ? '${fmtQty(product.quantity)} kg' : product.stockLabel(product.quantity)}',
                   color: product.quantity <= 0
                       ? PosAppTheme.dangerRed
                       : product.quantity < 10

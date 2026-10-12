@@ -49,6 +49,13 @@ class ServerSync {
     await _persistPending(pending);
   }
 
+  /// Drops every queued sale without sending it. Used when the reports are
+  /// reset, so bills from before the wipe are not re-pushed into the server.
+  Future<void> clearPending() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_pendingKey);
+  }
+
   /// Called after (re)connecting so queued sales are delivered.
   Future<void> flushPending({String? url}) async {
     if (url != null) {

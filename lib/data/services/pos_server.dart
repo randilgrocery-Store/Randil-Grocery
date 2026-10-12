@@ -11,6 +11,7 @@ import '../database/database_service.dart';
 import '../models/sale.dart';
 import '../models/shop_settings.dart';
 import 'pos_protocol.dart';
+import '../../presentation/widgets/product_image.dart';
 
 /// The admin PC's built-in server. Hosts the single live database over a small
 /// HTTP API that cashier terminals (and later the mobile app) talk to, and
@@ -23,6 +24,15 @@ class PosServer {
   Timer? _announceTimer;
   ShopSettings _settings = ShopSettings();
   String _status = 'Stopped';
+
+  /// Notified whenever another terminal pushes a sale into this server, so the
+  /// host machine's own UI can refresh its stock/dashboard immediately.
+  void Function()? onSaleRecorded;
+
+  /// Fired when another machine pushes money rows up (expenses/wastage) or
+  /// wipes the reports, so this server's own screens repaint immediately
+  /// instead of waiting for the next local action.
+  void Function()? onMirrorChanged;
 
   /// True while the server is listening and answering requests.
   bool get isRunning => _httpServer != null;
@@ -61,9 +71,15 @@ class PosServer {
 
     final router = Router()
       ..get('/api/health', _wrap(_health))
+      ..get('/api/catalog/revision', _wrap(_catalogRevision))
       ..get('/api/catalog', _wrap(_catalog))
+      ..get('/api/images/<name>', _wrapImage)
       ..get('/api/customers', _wrap(_customers))
       ..get('/api/report/daily', _wrap(_dailyReport))
+      ..get('/api/mirror/revision', _wrap(_mirrorRevision))
+      ..get('/api/mirror', _wrap(_mirror))
+      ..post('/api/mirror', _wrap(_pushMirror))
+      ..post('/api/mirror/reset', _wrap(_resetMirror))
       ..get('/api/guide', _wrap(_guide))
       ..post('/api/sales', _wrap(_pushSale))
       ..all('/<ignored|.*>', _notFound);
@@ -135,13 +151,106 @@ class PosServer {
     final products = await _dbService.getAllProducts();
     final categories = await _dbService.getAllCategories();
     final customers = await _dbService.getAllCustomers();
+    final suppliers = await _dbService.getAllSuppliers(includeInactive: true);
+    final settings = await _dbService.getShopSettings();
     return jsonResponse(200, {
       'ok': true,
       'products': products.map((e) => e.toMap()).toList(),
       'categories': categories.map((e) => e.toMap()).toList(),
       'customers': customers.map((e) => e.toMap()).toList(),
+      'suppliers': suppliers.map((e) => e.toMap()).toList(),
+      // Label-scale layout is configured on the admin PC and copied to every
+      // terminal, so the counter PC decodes scale labels without extra setup.
+      'scale': {
+        'enabled': settings.scaleBarcodeEnabled,
+        'prefix': settings.scaleBarcodePrefix,
+        'length': settings.scaleBarcodeLength,
+        'itemLength': settings.scaleBarcodeItemLength,
+        'priceMode': settings.scaleBarcodePriceMode,
+        'checkDigit': settings.scaleBarcodeCheckDigit,
+      },
       'syncedAt': DateTime.now().toIso8601String(),
     });
+  }
+
+  Future<Response> _catalogRevision(Request req) async {
+    final revision = await _dbService.catalogRevision();
+    return jsonResponse(200, {'ok': true, 'revision': revision});
+  }
+
+  Future<Response> _wrapImage(Request req, String name) async {
+    try {
+      return await _image(req, name);
+    } catch (e) {
+      return jsonResponse(500, {'ok': false, 'error': e.toString()});
+    }
+  }
+
+  /// Serves a product image stored in the app's own image folder.
+  ///
+  /// Clients download these over LAN during catalog sync so product pictures
+  /// appear on every terminal. The name is a bare filename; path separators
+  /// are stripped so a crafted request can never escape the image folder.
+  Future<Response> _image(Request req, String name) async {
+    // shelf matches against the still-percent-encoded path, so undo the client's
+    // encoding first (legacy filenames can contain spaces or brackets), then
+    // strip any separator so a crafted `%2F` can never escape the image folder.
+    var decoded = name;
+    try {
+      decoded = Uri.decodeComponent(decoded);
+    } catch (_) {
+      // Not valid escapes — treat the raw segment as the filename.
+    }
+    final safeName = decoded.split(RegExp(r'[/\\]')).last;
+    if (safeName.isEmpty || safeName == '.' || safeName == '..') {
+      return jsonResponse(404, {'ok': false, 'error': 'Not found'});
+    }
+
+    File? file = await _findImageFile(safeName);
+    if (file == null) {
+      return jsonResponse(404, {'ok': false, 'error': 'Not found'});
+    }
+    final bytes = await file.readAsBytes();
+    return Response.ok(bytes, headers: {
+      'content-type': _contentTypeFor(safeName),
+      'cache-control': 'public, max-age=31536000',
+    });
+  }
+
+  /// Locates [name] on this PC: first the normal image folder, then — for rows
+  /// whose imagePath still points at an absolute path from an older build —
+  /// wherever the database says the picture lives.
+  Future<File?> _findImageFile(String name) async {
+    final folder =
+        File('${ProductImageStore.directory().path}${Platform.pathSeparator}$name');
+    if (folder.existsSync()) return folder;
+
+    // Older rows store a full path (e.g. a Downloads file). Match by basename.
+    try {
+      final products = await _dbService.getAllProducts();
+      for (final p in products) {
+        final stored = p.imagePath;
+        if (stored == null || stored.isEmpty) continue;
+        if (stored.split(RegExp(r'[/\\]')).last != name) continue;
+        final resolved = ProductImageStore.resolve(stored);
+        if (resolved != null && File(resolved).existsSync()) {
+          return File(resolved);
+        }
+        if (File(stored).existsSync()) return File(stored);
+      }
+    } catch (_) {
+      // DB unavailable — 404 below.
+    }
+    return null;
+  }
+
+  static String _contentTypeFor(String name) {
+    final lower = name.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.bmp')) return 'image/bmp';
+    return 'image/jpeg';
   }
 
   Future<Response> _customers(Request req) async {
@@ -213,10 +322,115 @@ class PosServer {
 
     final sale = Sale.fromMap(payload);
     final recorded = await _dbService.recordRemoteSale(sale);
+    onSaleRecorded?.call(); // Refresh this machine's stock/dashboard UI.
     return jsonResponse(200, {
       'ok': true,
       'invoiceNumber': recorded.invoiceLabel,
       'saleDate': recorded.saleDate.toIso8601String(),
+    });
+  }
+
+  /// Cheap fingerprint of the shop's billing/expenses/wastage. A terminal
+  /// polls this and only pulls rows when it actually moved.
+  Future<Response> _mirrorRevision(Request req) async {
+    return jsonResponse(200, {
+      'ok': true,
+      'revision': await _dbService.financialRevision(),
+    });
+  }
+
+  /// Everything written at or after `since`, so a terminal's reports, stock,
+  /// reload cards, refunds, repacks, goods received and supplier payments all
+  /// match this machine's without re-downloading history on every check.
+  Future<Response> _mirror(Request req) async {
+    final raw = req.url.queryParameters['since'];
+    DateTime? since;
+    if (raw != null && raw.isNotEmpty) {
+      since = DateTime.tryParse(raw);
+      if (since == null) {
+        return jsonResponse(400, {'ok': false, 'error': 'Invalid since'});
+      }
+    }
+
+    // Captured *before* reading, so the watermark the caller derives from it
+    // can never skip a row written while this request was in flight.
+    final serverNow = DateTime.now();
+    final rows = await _dbService.mirrorRowsSince(since);
+    return jsonResponse(200, {
+      'ok': true,
+      'serverNow': serverNow.toIso8601String(),
+      'resetToken': await _dbService.reportsResetAt(),
+      'tables': rows,
+    });
+  }
+
+  /// Accepts records written on the *other* machine.
+  ///
+  /// Bills are not sent here: they arrive through `/api/sales`, which also
+  /// moves stock, so routing them twice would double-count quantities. Every
+  /// other table (expenses, wastage, reload cards, refunds, repack runs, goods
+  /// received, purchase orders and supplier payments) is merged verbatim, and
+  /// any stock the other till moved travels separately as a delta.
+  Future<Response> _pushMirror(Request req) async {
+    final body = await req.readAsString();
+    final payload = jsonDecode(body);
+    if (payload is! Map<String, dynamic>) {
+      return jsonResponse(400, {'ok': false, 'error': 'Invalid mirror payload'});
+    }
+
+    // Refuse a push from a terminal that has not caught up with the latest
+    // report reset. Without this, a PC still holding the old bills/expenses/
+    // wastage/reload rows could send them straight back, undoing the reset.
+    final clientToken = payload['resetToken'] as String? ?? '';
+    final serverToken = await _dbService.reportsResetAt() ?? '';
+    if (clientToken != serverToken) {
+      return jsonResponse(200, {
+        'ok': true,
+        'stale': true,
+        'applied': 0,
+        'stockMoved': 0,
+        'resetToken': serverToken,
+        'serverNow': DateTime.now().toIso8601String(),
+      });
+    }
+
+    final rawTables = payload['tables'];
+    final applied = rawTables is Map
+        ? await _dbService.applyMirror(Map<String, dynamic>.from(rawTables))
+        : 0;
+
+    final stockDeltas = (payload['stockDeltas'] as List? ?? [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final stockMoved = await _dbService.applyStockDeltas(stockDeltas);
+
+    if (applied > 0) {
+      onMirrorChanged?.call();
+    }
+    // Stock moved: refresh this machine's own product grid and figures too.
+    if (stockMoved > 0) {
+      onSaleRecorded?.call();
+    }
+
+    return jsonResponse(200, {
+      'ok': true,
+      'applied': applied,
+      'stockMoved': stockMoved,
+      'serverNow': DateTime.now().toIso8601String(),
+    });
+  }
+
+  /// Clears the shop's report history on request. Stock, products, images and
+  /// customers are untouched, and the reset is stamped so every terminal wipes
+  /// its mirrored copy on its next sync instead of pulling the old rows back.
+  Future<Response> _resetMirror(Request req) async {
+    final cleared = await _dbService.clearFinancialHistory();
+    onMirrorChanged?.call();
+    return jsonResponse(200, {
+      'ok': true,
+      'cleared': cleared,
+      'resetAt': await _dbService.reportsResetAt(),
     });
   }
 

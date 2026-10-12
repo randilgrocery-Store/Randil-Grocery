@@ -59,4 +59,30 @@ class WastageProvider extends ChangeNotifier {
     DateTime end,
   ) async =>
       _dbService.getWastageReport(start, end);
+
+  Future<Wastage?> updateWastage({
+    required String id,
+    double? quantity,
+    String? reason,
+    String? notes,
+    DateTime? wastageDate,
+  }) async {
+    final updated = await _dbService.updateWastage(
+      id: id,
+      quantity: quantity,
+      reason: reason,
+      notes: notes,
+      wastageDate: wastageDate,
+    );
+    await loadWastages();
+    SupabaseSyncService.instance.notifyDataChanged();
+    return updated;
+  }
+
+  Future<bool> deleteWastage(String id) async {
+    final ok = await _dbService.deleteWastage(id);
+    await loadWastages();
+    SupabaseSyncService.instance.notifyDataChanged();
+    return ok;
+  }
 }

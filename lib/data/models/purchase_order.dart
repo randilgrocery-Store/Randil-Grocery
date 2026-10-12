@@ -44,9 +44,11 @@ class PurchaseOrder {
     this.notes = '',
     DateTime? orderDate,
     this.receivedDate,
+    DateTime? createdAt,
   })  : id = id ?? const Uuid().v4(),
         orderNumber = orderNumber ?? _generateOrderNumber(),
-        orderDate = orderDate ?? DateTime.now();
+        orderDate = orderDate ?? DateTime.now(),
+        createdAt = createdAt ?? DateTime.now();
 
   factory PurchaseOrder.fromMap(Map<String, dynamic> map) {
     final rawItems = map['items'];
@@ -65,6 +67,9 @@ class PurchaseOrder {
       receivedDate: map['receivedDate'] != null
           ? DateTime.parse(map['receivedDate'] as String)
           : null,
+      createdAt: map['createdAt'] != null && (map['createdAt'] as String).isNotEmpty
+          ? DateTime.tryParse(map['createdAt'] as String)
+          : DateTime.tryParse(map['orderDate'] as String),
     );
   }
 
@@ -77,6 +82,11 @@ class PurchaseOrder {
   final String notes;
   final DateTime orderDate;
   final DateTime? receivedDate;
+
+  /// When the order was entered on this machine. Drives the LAN mirror clock
+  /// (an order received the same day is stamped with a midnight receivedDate,
+  /// which alone would sort before the sync watermark).
+  final DateTime createdAt;
 
   bool get isReceived => status == 'Received';
   bool get isCancelled => status == 'Cancelled';
@@ -96,6 +106,7 @@ class PurchaseOrder {
         'notes': notes,
         'orderDate': orderDate.toIso8601String(),
         'receivedDate': receivedDate?.toIso8601String(),
+        'createdAt': createdAt.toIso8601String(),
       };
 
   PurchaseOrder copyWith({
@@ -111,6 +122,7 @@ class PurchaseOrder {
         notes: notes,
         orderDate: orderDate,
         receivedDate: receivedDate ?? this.receivedDate,
+        createdAt: createdAt,
       );
 }
 

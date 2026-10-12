@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../../../data/models/product.dart';
 import '../../../data/models/product_batch.dart';
+import '../../../data/models/wastage.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/batch_provider.dart';
 import '../../providers/product_provider.dart';
@@ -49,6 +50,23 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
     if (mounted) {
       setState(() => _report = report);
     }
+  }
+
+  Product? _productById(String id) {
+    for (final p in context.read<ProductProvider>().allProducts) {
+      if (p.id == id) return p;
+    }
+    return null;
+  }
+
+  /// Human-readable wasted quantity. Break-bulk stock is kept in boxes, so a
+  /// 0.3-box loss of a 10-piece product reads as "3 pieces" (or "1 box + 5
+  /// pieces" when more than a box was lost).
+  String _wastageQtyLabel(Wastage w, Product? product) {
+    if (product != null && product.isBreakBulk) {
+      return product.stockLabel(w.quantity);
+    }
+    return '${fmtQty(w.quantity)} ${w.quantity == 1 ? 'unit' : 'units'}';
   }
 
   @override
@@ -98,6 +116,12 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                     separatorBuilder: (_, __) => const Divider(height: 14),
                     itemBuilder: (context, index) {
                       final w = wastages[index];
+                      final byId = {
+                        for (final p in context
+                            .read<ProductProvider>()
+                            .allProducts)
+                          p.id: p,
+                      };
                       return GroceryCard(
                         child: Padding(
                           padding: const EdgeInsets.all(12),
@@ -130,7 +154,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                                     ),
                                     const SizedBox(height: 2),
                                     Text(
-                                      '${w.reason}  •  ${fmtQty(w.quantity)} units'
+                                      '${w.reason}  •  ${_wastageQtyLabel(w, byId[w.productId])}'
                                       '${w.batchNumber.isNotEmpty ? '  •  Batch ${w.batchNumber}' : ''}'
                                       '  •  ${DateFormat('MMM dd, yyyy').format(w.wastageDate)}',
                                       style: const TextStyle(
@@ -157,13 +181,42 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                                   ],
                                 ),
                               ),
-                              Text(
-                                'Rs. ${w.lossValue.toStringAsFixed(2)}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14,
-                                  color: PosAppTheme.dangerRed,
-                                ),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Text(
+                                    'Rs. ${w.lossValue.toStringAsFixed(2)}',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                      color: PosAppTheme.dangerRed,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        tooltip: 'Edit this wastage record',
+                                        visualDensity: VisualDensity.compact,
+                                        icon: const Icon(Icons.edit_outlined,
+                                            size: 18),
+                                        color: PosAppTheme.primaryGreen,
+                                        onPressed: () =>
+                                            _showEditWastageDialog(context, w),
+                                      ),
+                                      IconButton(
+                                        tooltip: 'Remove this wastage record',
+                                        visualDensity: VisualDensity.compact,
+                                        icon: const Icon(Icons.delete_outline,
+                                            size: 18),
+                                        color: PosAppTheme.dangerRed,
+                                        onPressed: () =>
+                                            _confirmDeleteWastage(context, w),
+                                      ),
+                                    ],
+                                  ),
+                                ],
                               ),
                             ],
                           ),
@@ -178,13 +231,221 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
         ),
       );
 
+  void _showEditWastageDialog(BuildContext context, Wastage w) {
+    final product = _productById(w.productId);
+    final isBreakBulk = product?.isBreakBulk ?? false;
+    final ppb = product != null && product.piecesPerBox > 1
+        ? product.piecesPerBox
+        : 1;
+    final qtyCtrl = TextEditingController(
+      text: isBreakBulk
+          ? '${(w.quantity * ppb).round()}'
+          : w.quantity.toString(),
+    );
+    final notesCtrl = TextEditingController(text: w.notes);
+    String selectedReason = w.reason;
+    DateTime selectedDate = w.wastageDate;
+    bool wasteInPieces = isBreakBulk;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit Wastage'),
+        content: SizedBox(
+          width: 400,
+          child: SingleChildScrollView(
+            child: StatefulBuilder(
+              builder: (ctx, setState) => Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      w.productName,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  GroceryTextField(
+                    controller: qtyCtrl,
+                    label: isBreakBulk
+                        ? (wasteInPieces ? 'Pieces *' : 'Boxes *')
+                        : 'Quantity *',
+                    hint: isBreakBulk
+                        ? (wasteInPieces
+                            ? 'Loose pieces wasted'
+                            : 'Whole boxes wasted')
+                        : 'Units wasted',
+                    prefixIcon: Icons.numbers,
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                  ),
+                  if (isBreakBulk) ...[
+                    const SizedBox(height: 8),
+                    _UnitToggle(
+                      pieces: wasteInPieces,
+                      piecesPerBox: ppb,
+                      onChanged: (nowPieces) {
+                        setState(() {
+                          final typed =
+                              double.tryParse(qtyCtrl.text.trim());
+                          if (typed != null && typed > 0) {
+                            qtyCtrl.text = fmtQty(nowPieces
+                                ? typed * ppb
+                                : typed / ppb);
+                          }
+                          wasteInPieces = nowPieces;
+                        });
+                      },
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedReason,
+                    decoration: const InputDecoration(
+                      labelText: 'Reason',
+                      prefixIcon: Icon(Icons.report_problem),
+                    ),
+                    items: _reasons
+                        .map((r) => DropdownMenuItem(value: r, child: Text(r)))
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) selectedReason = v;
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  InkWell(
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: ctx,
+                        initialDate: selectedDate,
+                        firstDate: DateTime(2020),
+                        lastDate: DateTime.now(),
+                      );
+                      if (picked != null) {
+                        setState(() => selectedDate = picked);
+                      }
+                    },
+                    child: InputDecorator(
+                      decoration: const InputDecoration(
+                        labelText: 'Date',
+                        prefixIcon: Icon(Icons.calendar_today),
+                      ),
+                      child: Text(
+                        DateFormat('MMM dd, yyyy').format(selectedDate),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  GroceryTextField(
+                    controller: notesCtrl,
+                    label: 'Notes (optional)',
+                    hint: 'Any additional details',
+                    prefixIcon: Icons.notes,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final qty = double.tryParse(qtyCtrl.text.trim());
+              if (qty == null || qty <= 0) {
+                showTopSnackBar(
+                  context,
+                  const SnackBar(
+                    content: Text('Enter a valid quantity'),
+                    backgroundColor: Color(0xFFD32F2F),
+                  ),
+                );
+                return;
+              }
+              // Stock is kept in boxes; pieces become a fraction of a box.
+              final boxQty =
+                  isBreakBulk && wasteInPieces ? qty.round() / ppb : qty;
+              Navigator.pop(ctx);
+              final updated = await context
+                  .read<WastageProvider>()
+                  .updateWastage(
+                    id: w.id,
+                    quantity: boxQty,
+                    reason: selectedReason,
+                    notes: notesCtrl.text.trim(),
+                    wastageDate: selectedDate,
+                  );
+              if (!context.mounted) return;
+              showTopSnackBar(
+                context,
+                SnackBar(
+                  content: Text(updated != null
+                      ? 'Wastage updated'
+                      : 'Could not update the wastage record'),
+                  backgroundColor: updated != null
+                      ? const Color(0xFF2E7D32)
+                      : const Color(0xFFD32F2F),
+                ),
+              );
+            },
+            child: const Text('Save Changes'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmDeleteWastage(BuildContext context, Wastage w) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove this wastage record?'),
+        content: Text(
+          '${w.productName} — ${_wastageQtyLabel(w, _productById(w.productId))} '
+          '(Rs. ${w.lossValue.toStringAsFixed(2)}) will be put back on the shelf.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: PosAppTheme.dangerRed,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final ok = await context.read<WastageProvider>().deleteWastage(w.id);
+    if (!mounted) return;
+    showTopSnackBar(
+      context,
+      SnackBar(
+        content: Text(ok
+            ? 'Wastage record removed, stock restored'
+            : 'Could not remove the wastage record'),
+        backgroundColor: ok ? const Color(0xFF2E7D32) : const Color(0xFFD32F2F),
+      ),
+    );
+  }
+
   void _showAddWastageDialog(BuildContext context) {
     final qtyCtrl = TextEditingController();
     final notesCtrl = TextEditingController();
+    final scanCtrl = TextEditingController();
     Product? selectedProduct;
     ProductBatch? selectedBatch;
     String selectedReason = _reasons.first;
     DateTime selectedDate = DateTime.now();
+    bool wasteInPieces = true;
     final recordedBy =
         context.read<AuthProvider>().currentUser?.fullName ?? 'Cashier';
 
@@ -203,7 +464,59 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                   return Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      TextField(
+                        controller: scanCtrl,
+                        textInputAction: TextInputAction.done,
+                        decoration: const InputDecoration(
+                          labelText: 'Scan barcode',
+                          hintText:
+                              'Scan or type the barcode to pick the product',
+                          prefixIcon: Icon(Icons.barcode_reader),
+                        ),
+                        onSubmitted: (value) async {
+                          final code = value.trim();
+                          if (code.isEmpty) return;
+                          Product? found;
+                          try {
+                            found =
+                                await productProvider.getProductByCode(code) ??
+                                    await productProvider
+                                        .getProductByBarcodeLoose(code);
+                          } catch (_) {}
+                          if (found == null) {
+                            showTopSnackBar(context, 
+                              const SnackBar(
+                                content:
+                                    Text('No product matches that barcode'),
+                                backgroundColor: Colors.orange,
+                              ),
+                            );
+                            return;
+                          }
+                          Product? inList;
+                          for (final p in products) {
+                            if (p.id == found.id) {
+                              inList = p;
+                              break;
+                            }
+                          }
+                          final resolved = inList ?? found;
+                          setState(() {
+                            selectedProduct = resolved;
+                            selectedBatch = null;
+                            wasteInPieces = true;
+                            qtyCtrl.clear();
+                          });
+                          scanCtrl.clear();
+                          if (inList != null) {
+                            await batchProvider.loadBatchesForProduct(inList.id);
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 12),
                       DropdownButtonFormField<Product>(
+                        key: ValueKey(
+                            'wastage-product-${selectedProduct?.id ?? ''}'),
                         initialValue: selectedProduct,
                         hint: const Text('Select Product *'),
                         isExpanded: true,
@@ -218,6 +531,8 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                           setState(() {
                             selectedProduct = value;
                             selectedBatch = null;
+                            wasteInPieces = true;
+                            qtyCtrl.clear();
                           });
                           if (value != null) {
                             await batchProvider.loadBatchesForProduct(value.id);
@@ -249,11 +564,40 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                       ],
                       GroceryTextField(
                         controller: qtyCtrl,
-                        label: 'Quantity *',
-                        hint: 'Units wasted',
+                        label:
+                            selectedProduct?.isBreakBulk == true
+                                ? (wasteInPieces ? 'Pieces *' : 'Boxes *')
+                                : 'Quantity *',
+                        hint:
+                            selectedProduct?.isBreakBulk == true
+                                ? (wasteInPieces
+                                    ? 'Loose pieces wasted'
+                                    : 'Whole boxes wasted')
+                                : 'Units wasted',
                         prefixIcon: Icons.numbers,
-                        keyboardType: TextInputType.number,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
                       ),
+                      if (selectedProduct?.isBreakBulk == true) ...[
+                        const SizedBox(height: 8),
+                        _UnitToggle(
+                          pieces: wasteInPieces,
+                          piecesPerBox: selectedProduct!.piecesPerBox,
+                          onChanged: (nowPieces) {
+                            setState(() {
+                              final typed =
+                                  double.tryParse(qtyCtrl.text.trim());
+                              if (typed != null && typed > 0) {
+                                qtyCtrl.text = fmtQty(nowPieces
+                                    ? typed * selectedProduct!.piecesPerBox
+                                    : typed /
+                                        selectedProduct!.piecesPerBox);
+                              }
+                              wasteInPieces = nowPieces;
+                            });
+                          },
+                        ),
+                      ],
                       const SizedBox(height: 12),
                       DropdownButtonFormField<String>(
                         initialValue: selectedReason,
@@ -331,13 +675,21 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                 );
                 return;
               }
+              // Stock is kept in boxes; loose pieces become a fraction of a box.
+              final breakBulk = selectedProduct!.isBreakBulk;
+              final ppb = selectedProduct!.piecesPerBox > 1
+                  ? selectedProduct!.piecesPerBox
+                  : 1;
+              final boxQty =
+                  breakBulk && wasteInPieces ? qty.round() / ppb : qty;
               final available =
                   selectedBatch?.quantity ?? selectedProduct!.quantity;
-              if (qty > available) {
+              if (boxQty > available + 0.0001) {
                 showTopSnackBar(context, 
                   SnackBar(
                     content: Text(
-                        'Quantity exceeds available stock ($available units)'),
+                        'Quantity exceeds available stock'
+                        ' (${selectedProduct!.stockLabel(available)})'),
                     backgroundColor: Colors.red,
                   ),
                 );
@@ -348,7 +700,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                     await context.read<WastageProvider>().addWastage(
                           productId: selectedProduct!.id,
                           productName: selectedProduct!.name,
-                          quantity: qty,
+                          quantity: boxQty,
                           reason: selectedReason,
                           batchId: selectedBatch?.id ?? '',
                           batchNumber: selectedBatch?.batchNumber ?? '',
@@ -490,4 +842,68 @@ class _StatCard extends StatelessWidget {
           ),
         ),
       );
+}
+
+/// "Pieces / Boxes" switch for wastage on a break-bulk product (stock is kept
+/// in boxes, but loose single pieces are the usual thing wasted).
+class _UnitToggle extends StatelessWidget {
+  const _UnitToggle({
+    required this.pieces,
+    required this.piecesPerBox,
+    required this.onChanged,
+  });
+
+  final bool pieces;
+  final int piecesPerBox;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget button(String label, bool selected, VoidCallback onTap) => Expanded(
+          child: Material(
+            color: selected
+                ? PosAppTheme.primaryGreen.withOpacity(0.12)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+            child: InkWell(
+              onTap: onTap,
+              borderRadius: BorderRadius.circular(8),
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: selected
+                        ? PosAppTheme.primaryGreen
+                        : Colors.grey.shade400,
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: selected
+                        ? PosAppTheme.primaryGreen
+                        : PosAppTheme.textGray,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+    return Row(
+      children: [
+        button('Pieces', pieces, () => onChanged(true)),
+        const SizedBox(width: 8),
+        button('Boxes', !pieces, () => onChanged(false)),
+        const SizedBox(width: 8),
+        Text(
+          '$piecesPerBox per box',
+          style: const TextStyle(color: PosAppTheme.textGray, fontSize: 11),
+        ),
+      ],
+    );
+  }
 }

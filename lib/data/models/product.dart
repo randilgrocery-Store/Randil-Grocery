@@ -14,6 +14,8 @@ class Product {
     this.reorderLevel,
     this.imagePath,
     this.soldByWeight = false,
+    this.piecesPerBox = 1,
+    this.singlePrice = 0,
     DateTime? createdAt,
     DateTime? updatedAt,
   })  : id = id ?? const Uuid().v4(),
@@ -36,6 +38,8 @@ class Product {
         reorderLevel: map['reorderLevel'] as int?,
         imagePath: map['imagePath'] as String?,
         soldByWeight: (map['soldByWeight'] as int? ?? 0) == 1,
+        piecesPerBox: (map['piecesPerBox'] as num?)?.toInt() ?? 1,
+        singlePrice: (map['singlePrice'] as num?)?.toDouble() ?? 0,
         createdAt: DateTime.parse(map['createdAt'] as String),
         updatedAt: DateTime.parse(map['updatedAt'] as String),
       );
@@ -53,8 +57,49 @@ class Product {
   /// When true the product is sold per kilogram and the POS allows
   /// fractional quantities (e.g. 0.500 kg of dhal). sellingPrice is per kg.
   final bool soldByWeight;
+  /// Break-bulk: how many single pieces make up one box. `1` means the product
+  /// is not sold loose. Stock (`quantity`) stays in boxes; a single piece sold
+  /// at the counter deducts `1 / piecesPerBox` of a box.
+  final int piecesPerBox;
+  /// Break-bulk: the price of one single piece when sold loose from the box.
+  /// `0` falls back to `sellingPrice / piecesPerBox`.
+  final double singlePrice;
   final DateTime createdAt;
   final DateTime updatedAt;
+
+  /// True when this product can be sold both as a whole box and as loose
+  /// single pieces (only its box carries a barcode).
+  bool get isBreakBulk => piecesPerBox > 1;
+
+  /// Price charged for one single piece sold loose from the box.
+  double get loosePrice => singlePrice > 0
+      ? singlePrice
+      : (piecesPerBox > 1 ? sellingPrice / piecesPerBox : sellingPrice);
+
+  /// Human-readable stock for this product. Break-bulk stock (tracked in
+  /// boxes) is shown as whole boxes plus loose pieces, e.g. "2 boxes + 3
+  /// pieces"; everything else is just the number, trimmed of trailing zeros.
+  String stockLabel(double qty) {
+    if (!isBreakBulk || qty <= 0) return _trimQty(qty);
+    final n = piecesPerBox;
+    var boxes = qty.floor();
+    var pieces = ((qty - boxes) * n).round();
+    if (pieces >= n) {
+      boxes += 1;
+      pieces = 0;
+    }
+    if (boxes > 0 && pieces > 0) {
+      return '$boxes ${boxes == 1 ? 'box' : 'boxes'} + '
+          '$pieces ${pieces == 1 ? 'piece' : 'pieces'}';
+    }
+    if (boxes > 0) return '$boxes ${boxes == 1 ? 'box' : 'boxes'}';
+    return '$pieces ${pieces == 1 ? 'piece' : 'pieces'}';
+  }
+
+  static String _trimQty(double v) {
+    if (v == v.roundToDouble()) return v.toInt().toString();
+    return v.toStringAsFixed(3).replaceFirst(RegExp(r'\.?0+$'), '');
+  }
 
   // Getters for profit calculation
   double get profit => sellingPrice - buyingPrice;
@@ -95,6 +140,8 @@ class Product {
     int? reorderLevel,
     String? imagePath,
     bool? soldByWeight,
+    int? piecesPerBox,
+    double? singlePrice,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) =>
@@ -111,6 +158,8 @@ class Product {
         reorderLevel: reorderLevel ?? this.reorderLevel,
         imagePath: imagePath ?? this.imagePath,
         soldByWeight: soldByWeight ?? this.soldByWeight,
+        piecesPerBox: piecesPerBox ?? this.piecesPerBox,
+        singlePrice: singlePrice ?? this.singlePrice,
         createdAt: createdAt ?? this.createdAt,
         updatedAt: updatedAt ?? this.updatedAt,
       );
@@ -129,6 +178,8 @@ class Product {
         'reorderLevel': reorderLevel,
         'imagePath': imagePath,
         'soldByWeight': soldByWeight ? 1 : 0,
+        'piecesPerBox': piecesPerBox,
+        'singlePrice': singlePrice,
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
       };

@@ -43,25 +43,118 @@ class AppSidebar extends StatelessWidget {
   final bool collapsed;
   final VoidCallback onToggleCollapsed;
 
-  /// Admin screen groups. Shared with the Ctrl+K command palette.
+  /// ---- Single source of truth for the shell's screens ----
+  ///
+  /// The screen labels/icons live here (not in `home_screen.dart`) so the
+  /// sidebar groups, the Ctrl+K palette and the shell body can never drift
+  /// apart. Adding a screen means adding it here; a missing or duplicate group
+  /// index fails loudly via [coversEveryScreen] and the accompanying test.
+  static const adminLabels = <String>[
+    'Dashboard',
+    'POS',
+    'Inventory',
+    'GRN',
+    'Batches',
+    'Expiry',
+    'Purchase Orders',
+    'Suppliers',
+    'Refunds',
+    'Customers',
+    'Expenses',
+    'Wastage',
+    'Production',
+    'Reload',
+    'Reports',
+    'Settings',
+    'Shopping Bags',
+  ];
+
+  static const adminIcons = <IconData>[
+    Icons.dashboard,
+    Icons.point_of_sale,
+    Icons.inventory_2,
+    Icons.assignment_turned_in,
+    Icons.view_agenda,
+    Icons.event_busy,
+    Icons.local_shipping,
+    Icons.business,
+    Icons.assignment_return,
+    Icons.people,
+    Icons.receipt_long,
+    Icons.delete_sweep,
+    Icons.factory,
+    Icons.sim_card,
+    Icons.assessment,
+    Icons.settings,
+    Icons.shopping_bag,
+  ];
+
+  static const cashierLabels = <String>[
+    'Dashboard',
+    'POS',
+    'GRN',
+    'Expiry',
+    'Refunds',
+    'Expenses',
+    'Reload',
+    'Profile',
+  ];
+
+  static const cashierIcons = <IconData>[
+    Icons.dashboard,
+    Icons.point_of_sale,
+    Icons.assignment_turned_in,
+    Icons.event_busy,
+    Icons.assignment_return,
+    Icons.receipt_long,
+    Icons.sim_card,
+    Icons.person,
+  ];
+
+  /// Admin screen groups. Indices into [adminLabels]; every index must appear
+  /// exactly once (enforced by `navigation_sections_test.dart`).
   static const adminSections = <SidebarSection>[
     SidebarSection('Dashboard', [0]),
-    SidebarSection('Sales', [1, 7, 8]),
-    SidebarSection('Inventory', [2, 4, 3, 5, 6, 10]),
-    SidebarSection('Finance', [9, 11]),
-    SidebarSection('System', [12]),
+    SidebarSection('Sales', [1, 7, 8, 9]), // POS, Suppliers, Customers, Refunds
+    SidebarSection('Inventory', [2, 3, 4, 5, 6, 12, 16]), // Inventory, GRN,
+    // Batches, Expiry, Purchase Orders, Production, Shopping Bags
+    SidebarSection('Finance', [10, 11, 13, 14]), // Expenses, Wastage, Reload,
+    // Reports
+    SidebarSection('System', [15]), // Settings
   ];
 
-  /// Cashier screen groups. Shared with the Ctrl+K command palette.
+  /// Cashier screen groups. Indices into [cashierLabels].
   static const cashierSections = <SidebarSection>[
     SidebarSection('Dashboard', [0]),
-    SidebarSection('Sales', [1, 3]),
-    SidebarSection('Inventory', [2]),
-    SidebarSection('Account', [4]),
+    SidebarSection('Sales', [1, 4]), // POS, Refunds
+    SidebarSection('Inventory', [2, 3]), // GRN, Expiry
+    SidebarSection('Account', [5, 6, 7]), // Expenses, Reload, Profile
   ];
 
-  static List<SidebarSection> sectionsFor(bool isAdmin) =>
-      isAdmin ? adminSections : cashierSections;
+  /// True when [sections] lists every index `0..count-1` exactly once. Guards
+  /// against a screen disappearing from the sidebar (the bug where Settings was
+  /// dropped when Expiry/Expenses shifted the indices).
+  static bool coversEveryScreen(List<SidebarSection> sections, int count) {
+    final seen = <int>[for (final s in sections) ...s.indices];
+    if (seen.length != count) return false;
+    final unique = seen.toSet();
+    if (unique.length != count) return false;
+    for (var i = 0; i < count; i++) {
+      if (!unique.contains(i)) return false;
+    }
+    return true;
+  }
+
+  static List<SidebarSection> sectionsFor(bool isAdmin) {
+    assert(
+      coversEveryScreen(
+        isAdmin ? adminSections : cashierSections,
+        (isAdmin ? adminLabels : cashierLabels).length,
+      ),
+      'Sidebar groups must cover every screen index exactly once.',
+    );
+    return isAdmin ? adminSections : cashierSections;
+  }
 
   @override
   Widget build(BuildContext context) {

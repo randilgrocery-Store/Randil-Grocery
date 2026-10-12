@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../data/database/database_service.dart';
 import '../../data/models/supplier.dart';
 import '../../data/models/supplier_payment.dart';
+import '../../data/models/supplier_return.dart';
 import '../../data/services/supabase_sync_service.dart';
 
 class SupplierProvider extends ChangeNotifier {
@@ -12,12 +13,15 @@ class SupplierProvider extends ChangeNotifier {
   Supplier? _selectedSupplier;
   final Map<String, double> _outstanding = {};
   List<SupplierPayment> _payments = [];
+  List<SupplierReturn> _returns = [];
 
   List<Supplier> get suppliers => _suppliers;
   Supplier? get selectedSupplier => _selectedSupplier;
   List<SupplierPayment> get payments => _payments;
+  List<SupplierReturn> get returns => _returns;
 
-  /// Money still owed to each supplier (GRN total minus payments made).
+  /// Money still owed to each supplier (GRN total minus payments minus the
+  /// value of goods returned to them).
   double outstandingFor(String supplierId) =>
       _outstanding[supplierId] ?? 0.0;
 
@@ -39,6 +43,42 @@ class SupplierProvider extends ChangeNotifier {
         ? await _dbService.getAllSupplierPayments()
         : await _dbService.getSupplierPayments(supplierId);
     notifyListeners();
+  }
+
+  Future<void> loadReturns([String? supplierId]) async {
+    _returns = supplierId == null
+        ? await _dbService.getAllSupplierReturns()
+        : await _dbService.getSupplierReturnsBySupplier(supplierId);
+    notifyListeners();
+  }
+
+  /// Record goods returned to a supplier: stock goes back out of the shelves
+  /// and the outstanding balance is credited by the returned value.
+  Future<bool> recordSupplierReturn({
+    required Supplier supplier,
+    required List<SupplierReturnItem> items,
+    required String reason,
+    String returnedBy = '',
+    String notes = '',
+    DateTime? returnDate,
+  }) async {
+    final record = SupplierReturn(
+      supplierId: supplier.id,
+      supplierName: supplier.name,
+      items: items,
+      reason: reason,
+      returnedBy: returnedBy,
+      notes: notes,
+      returnDate: returnDate ?? DateTime.now(),
+    );
+    final ok = await _dbService.recordSupplierReturn(record);
+    if (ok) {
+      _outstanding[supplier.id] =
+          await _dbService.getSupplierOutstanding(supplier.id);
+      notifyListeners();
+      SupabaseSyncService.instance.notifyDataChanged();
+    }
+    return ok;
   }
 
   /// Record a cash or cheque payment made to a supplier.

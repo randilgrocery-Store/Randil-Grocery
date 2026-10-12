@@ -23,6 +23,7 @@ class CustomerDisplayService {
   SalesProvider? _salesProvider;
   bool _started = false;
   bool _hidden = false;
+  Timer? _heartbeat;
 
   bool get isConnected => _window != null && !_hidden;
 
@@ -38,6 +39,21 @@ class CustomerDisplayService {
     if (_started) return;
     _started = true;
     await _openWindow();
+    // The heartbeat is started in _openWindow once a real display exists (see
+    // _ensureHeartbeat). If opening failed there is no point ticking a timer
+    // for a window that is not there - that leaked a timer for the whole test
+    // session and, in production, for the whole app run.
+  }
+
+  /// Starts the 2-second cart-push heartbeat if it is not already running.
+  ///
+  /// Called only after the customer display window has really opened, so no
+  /// timer is left running when there is no window to push to.
+  void _ensureHeartbeat() {
+    _heartbeat ??= Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => _pushCart(),
+    );
   }
 
   /// Opens (or re-shows) the customer display window.
@@ -92,6 +108,10 @@ class CustomerDisplayService {
       _hidden = false;
       try {
         await _window!.show();
+        // Re-place the window on the customer monitor every time it is
+        // re-shown (it may have been dragged or the displays re-arranged).
+        unawaited(_requestReconfigure());
+        _ensureHeartbeat();
       } catch (e) {
         debugPrint('CustomerDisplayService: failed to show window: $e');
       }
@@ -100,6 +120,10 @@ class CustomerDisplayService {
 
     try {
       await _window!.show();
+
+      // Ask the display window to place itself on the customer monitor; its
+      // engine may boot a moment after show(), so retry briefly.
+      unawaited(_requestReconfigure());
 
       // Opening the extra window can drop the main window out of fullscreen on
       // some Windows setups, so re-assert it now that the display exists.
@@ -111,6 +135,7 @@ class CustomerDisplayService {
       return;
     }
     lastError = null;
+    _ensureHeartbeat();
 
     // The sub-window registers its channel handler asynchronously; retry the
     // initial push for a short while.
@@ -118,6 +143,24 @@ class CustomerDisplayService {
       await Future<void>.delayed(const Duration(milliseconds: 400));
       final ok = await _pushCart();
       if (ok) break;
+    }
+  }
+
+  /// Asks the customer display window to (re)place itself on the secondary
+  /// monitor. The sub-window registers its handler asynchronously, so this
+  /// retries for a short while.
+  Future<void> _requestReconfigure() async {
+    for (var attempt = 0; attempt < 8; attempt++) {
+      try {
+        const channel = WindowMethodChannel(
+          'pos_channel',
+          mode: ChannelMode.unidirectional,
+        );
+        await channel.invokeMethod('reconfigure', '');
+        return;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
     }
   }
 

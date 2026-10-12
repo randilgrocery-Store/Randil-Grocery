@@ -8,7 +8,11 @@ import 'package:window_manager/window_manager.dart';
 
 import '../../../core/constants/responsive.dart';
 import '../../../core/utils/money_calculator.dart';
+import '../../../data/database/database_service.dart';
+import '../../../data/models/product.dart';
+import '../../../data/models/shop_settings.dart';
 import '../../../data/services/print_service.dart';
+import '../../../data/services/scale_barcode.dart';
 import '../../../data/services/sound_service.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/cash_drawer_coordinator.dart';
@@ -21,6 +25,7 @@ import '../../providers/settings_provider.dart';
 import '../../providers/theme_provider.dart';
 import '../../widgets/custom_widgets.dart';
 import '../../widgets/payment_method_selector.dart';
+import '../../widgets/product_image.dart';
 
 // Intent classes for keyboard shortcuts
 class ClearCartIntent extends Intent {
@@ -172,37 +177,146 @@ class _PosScreenState extends State<PosScreen> {
     context.read<ProductProvider>().searchProducts(query);
   }
 
-  Future<void> _handleBarcodeScan(String barcode) async {
-    if (barcode.isEmpty) return;
-
-    final productProvider = context.read<ProductProvider>();
-    final product = await productProvider.getProductByCode(barcode);
-
-    if (product != null && product.quantity > 0) {
-      if (product.soldByWeight) {
-        final weight = await _promptWeight(product);
-        if (weight == null) {
-          _searchController.clear();
-          _filterProducts();
-          _focusBarcode();
-          return;
-        }
-        await context
-            .read<SalesProvider>()
-            .addToCart(product, quantity: weight);
-      } else {
-        await context.read<SalesProvider>().addToCart(product);
-      }
-      await SoundService.playBeep();
-      _showSnackBar('${product.name} added to cart', isSuccess: true);
-    } else {
-      await SoundService.playError();
-      _showSnackBar('Product not found or out of stock');
-    }
-
+  /// Clears the scan/search box and puts the cursor back in it so the next
+  /// scan starts on a clean field.
+  ///
+  /// Unfocusing before clearing resets the platform text-input connection; on
+  /// Windows a stale composing region can otherwise repaint the just-scanned
+  /// barcode back into the box a moment after [TextEditingController.clear].
+  void _resetSearchBox() {
     _searchController.clear();
     _filterProducts();
+    _searchFocus.unfocus();
     _focusBarcode();
+  }
+
+  Future<void> _handleBarcodeScan(String barcode) async {
+    final code = barcode.trim();
+
+    // Clear the box *before* doing any async work. The scanner has already
+    // handed us the code, so the field no longer needs it, and this guarantees
+    // the barcode can never be left sitting in the box if a later step
+    // (product lookup, beep, network call) throws.
+    _resetSearchBox();
+
+    if (code.isEmpty) return;
+
+    try {
+      // A label from the weighing scale carries the item and its weight in one
+      // barcode. Decode it first; if it is not a scale label, fall through to
+      // the ordinary product lookup.
+      if (await _tryAddScaleBarcode(code)) return;
+
+      final productProvider = context.read<ProductProvider>();
+      final product = await productProvider.getProductByCode(code);
+
+      if (product != null && product.quantity > 0) {
+        if (product.soldByWeight) {
+          final weight = await _promptWeight(product);
+          if (weight == null) return;
+          await context
+              .read<SalesProvider>()
+              .addToCart(product, quantity: weight);
+        } else if (product.isBreakBulk) {
+          // Only the box carries a barcode; let the cashier pick a whole box
+          // or single pieces taken from it.
+          final loose = await _promptBoxOrSingle(product);
+          if (loose == null) return; // cancelled
+          await context
+              .read<SalesProvider>()
+              .addToCart(product, loose: loose);
+        } else {
+          await context.read<SalesProvider>().addToCart(product);
+        }
+        await SoundService.playBeep();
+        _showSnackBar('${product.name} added to cart', isSuccess: true);
+      } else {
+        await SoundService.playError();
+        _showSnackBar('Product not found or out of stock');
+      }
+    } finally {
+      if (mounted) _resetSearchBox();
+    }
+  }
+
+  /// Tries to read [code] as a barcode printed by the label scale (item + weight
+  /// in one). Returns true when the scan was consumed by the scale path — even
+  /// if it only reported "out of stock" — and false when [code] is an ordinary
+  /// product barcode that should be looked up normally.
+  Future<bool> _tryAddScaleBarcode(String code) async {
+    // Read the label-scale layout fresh from the database on every scan. On a
+    // cashier PC the layout is copied from the admin by the catalog sync, and
+    // using a possibly-stale cached copy here is what let a freshly-synced
+    // layout be ignored until the app was restarted.
+    final providerSettings = context.read<SettingsProvider>().settings;
+    ShopSettings settings;
+    try {
+      settings = await DatabaseService().getShopSettings();
+    } catch (_) {
+      settings = providerSettings;
+    }
+    if (!settings.scaleBarcodeEnabled) return false;
+    // Cheap reject before doing any database work.
+    if (code.length != settings.scaleBarcodeLength) return false;
+
+    final config = ScaleBarcodeConfig(
+      enabled: true,
+      prefix: settings.scaleBarcodePrefix,
+      totalLength: settings.scaleBarcodeLength,
+      itemLength: settings.scaleBarcodeItemLength,
+      priceMode: settings.scaleBarcodePriceMode,
+      checkDigit: settings.scaleBarcodeCheckDigit,
+    );
+
+    final productProvider = context.read<ProductProvider>();
+    for (final itemLength in ScaleBarcodeParser.candidateItemLengths(config)) {
+      final parsed =
+          ScaleBarcodeParser.decode(code, config, itemLength: itemLength);
+      if (parsed == null) continue;
+
+      final product = await _findScaleProduct(productProvider, parsed.itemCode);
+      if (product == null) continue; // wrong split; try the next width
+
+      if (product.quantity <= 0) {
+        await SoundService.playError();
+        _showSnackBar('${product.name} is out of stock');
+        return true;
+      }
+
+      final double quantity;
+      if (parsed.priceMode) {
+        if (product.sellingPrice <= 0) continue;
+        quantity = parsed.price / product.sellingPrice;
+      } else {
+        quantity = parsed.weightKg;
+      }
+      if (quantity <= 0) continue;
+
+      await context
+          .read<SalesProvider>()
+          .addToCart(product, quantity: quantity);
+      await SoundService.playBeep();
+      final detail = parsed.priceMode
+          ? 'Rs. ${parsed.price.toStringAsFixed(2)}'
+          : '${MoneyCalculator.formatQty(quantity, byWeight: true)} kg';
+      _showSnackBar('${product.name} added ($detail)', isSuccess: true);
+      return true;
+    }
+    return false;
+  }
+
+  /// Finds the product whose code matches a scale label's item/PLU code,
+  /// tolerating a scale that zero-pads the code (e.g. label `00101` → `101`).
+  Future<Product?> _findScaleProduct(
+    ProductProvider provider,
+    String itemCode,
+  ) async {
+    final direct = await provider.getProductByCode(itemCode);
+    if (direct != null) return direct;
+    // The label and the product barcode may differ only in leading zeros (a
+    // scale may zero-pad its PLU, and the item may be entered with a different
+    // number of zeros), so fall back to a leading-zero-tolerant match.
+    return provider.getProductByBarcodeLoose(itemCode);
   }
 
   void _sortProducts(String value) {
@@ -1172,18 +1286,46 @@ class _PosScreenState extends State<PosScreen> {
       return;
     }
 
+    // Hard stop on expired stock: if the newest lot has already passed its
+    // expiry, nothing on the shelf is safe to sell. Clear it with Wastage.
+    final prodProvider = context.read<ProductProvider>();
+    final latestExpiry = prodProvider.latestExpiryFor(product.id) ??
+        (product.expiryDate as DateTime?);
+    if (latestExpiry != null && latestExpiry.isBefore(DateTime.now())) {
+      SoundService.playError();
+      _showSnackBar(
+        '${product.name} has expired — record it in Wastage before selling',
+      );
+      return;
+    }
+
     // Weighed products (rice, dhal, vegetables...) are priced per kg, so the
     // cashier keys the weight instead of getting a fixed quantity of 1.
     double quantity = 1;
+    bool loose = false;
     if (product.soldByWeight == true) {
       final weight = await _promptWeight(product);
       if (weight == null) return; // cashier cancelled
       quantity = weight;
+    } else if (product.isBreakBulk) {
+      // Only the box is barcoded, so ask whether this is a whole box or single
+      // pieces taken from it.
+      final choice = await _promptBoxOrSingle(product);
+      if (choice == null) return; // cashier cancelled
+      loose = choice;
     }
 
-    await context.read<SalesProvider>().addToCart(product, quantity: quantity);
+    await context
+        .read<SalesProvider>()
+        .addToCart(product, quantity: quantity, loose: loose);
     SoundService.playBeep();
     _showSnackBar('${product.name} added to cart', isSuccess: true);
+
+    // Clear the search box after a product tapped from the filtered results so
+    // the full grid returns and the next item starts from a clean search.
+    if (_searchController.text.isNotEmpty) {
+      _resetSearchBox();
+    }
   }
 
   /// Big touch-friendly weight/quantity keypad for per-kg products.
@@ -1262,6 +1404,225 @@ class _PosScreenState extends State<PosScreen> {
     );
   }
 
+  /// Asks whether a break-bulk product (one whose only barcode is on the box)
+  /// is being sold as a whole box or as single pieces taken from it. Returns
+  /// `false` for a whole box, `true` for single pieces, or null when cancelled.
+  Future<bool?> _promptBoxOrSingle(Product product) {
+    final symbol = context.read<SettingsProvider>().settings.currencySymbol;
+    final perBox = product.sellingPrice;
+    final perPiece = product.loosePrice;
+    final boxesAvailable = product.quantity.floor();
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(product.name),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Stock: ${product.stockLabel(product.quantity)}',
+              style: const TextStyle(color: PosAppTheme.textGray, fontSize: 12),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: _boxOrSingleButton(
+                    title: 'Whole box',
+                    subtitle: '$symbol ${perBox.toStringAsFixed(2)}'
+                        '  ·  ${product.piecesPerBox} pcs',
+                    icon: Icons.inventory_2_outlined,
+                    onTap: boxesAvailable >= 1
+                        ? () => Navigator.pop(context, false)
+                        : null,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _boxOrSingleButton(
+                    title: 'Single piece',
+                    subtitle: '$symbol ${perPiece.toStringAsFixed(2)} / pc',
+                    icon: Icons.local_mall_outlined,
+                    onTap: () => Navigator.pop(context, true),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Quick "add a shopping bag to the bill" action. The bag is an ordinary
+  /// product from the reserved Shopping Bags category, so it charges its set
+  /// price, prints on the bill, reduces bag stock and counts towards
+  /// profit & loss exactly like any other item.
+  Future<void> _showBagDialog() async {
+    final bags = await DatabaseService().getShoppingBagProducts();
+    if (!mounted) return;
+
+    if (bags.isEmpty) {
+      _showSnackBar(
+        'No shopping bags — add one under Inventory → Shopping Bags',
+      );
+      return;
+    }
+
+    String? selectedId = bags.first.id;
+    final symbol = context.read<SettingsProvider>().settings.currencySymbol;
+    final qtyCtrl = TextEditingController(text: '1');
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
+          final selected = bags.firstWhere(
+            (b) => b.id == selectedId,
+            orElse: () => bags.first,
+          );
+          final out = selected.quantity <= 0;
+          return AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.shopping_bag, color: PosAppTheme.primaryGreen),
+                SizedBox(width: 8),
+                Text('Add Shopping Bag'),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<String>(
+                  initialValue: selectedId,
+                  decoration: const InputDecoration(
+                    labelText: 'Bag type',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: bags
+                      .map(
+                        (b) => DropdownMenuItem(
+                          value: b.id,
+                          child: Text(
+                            '${b.name}  ·  $symbol '
+                            '${b.sellingPrice.toStringAsFixed(2)}  ·  '
+                            'stock ${fmtQty(b.quantity)}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) {
+                      setDialogState(() => selectedId = value);
+                    }
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: qtyCtrl,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Bundles',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  out
+                      ? 'This bag is out of stock'
+                      : '$symbol ${selected.sellingPrice.toStringAsFixed(2)} per bundle',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: out
+                        ? PosAppTheme.dangerRed
+                        : PosAppTheme.textGray,
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton.icon(
+                onPressed: out
+                    ? null
+                    : () async {
+                        final qty = double.tryParse(qtyCtrl.text.trim());
+                        if (qty == null || qty <= 0) return;
+                        await context.read<SalesProvider>().addToCart(
+                              bags.firstWhere((b) => b.id == selectedId),
+                              quantity: qty,
+                            );
+                        await SoundService.playBeep();
+                        if (mounted) Navigator.pop(dialogContext);
+                      },
+                icon: const Icon(Icons.add_shopping_cart, size: 18),
+                label: const Text('Add to Bill'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _boxOrSingleButton({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    VoidCallback? onTap,
+  }) {
+    final enabled = onTap != null;
+    final colour =
+        enabled ? PosAppTheme.primaryGreen : PosAppTheme.textGray;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+        decoration: BoxDecoration(
+          border: Border.all(color: colour, width: 1.5),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          children: [
+            Icon(icon, color: colour, size: 28),
+            const SizedBox(height: 8),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                  color: enabled ? null : PosAppTheme.textGray),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: PosAppTheme.textGray, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _showProductPreviewDialog(dynamic product) async {
     await showDialog(
       context: context,
@@ -1280,17 +1641,17 @@ class _PosScreenState extends State<PosScreen> {
                 borderRadius:
                     const BorderRadius.vertical(top: Radius.circular(16)),
               ),
-              child: product.imagePath != null &&
-                      product.imagePath!.isNotEmpty &&
-                      File(product.imagePath!).existsSync()
-                  ? ClipRRect(
-                      borderRadius:
-                          const BorderRadius.vertical(top: Radius.circular(16)),
-                      child: Image.file(File(product.imagePath!),
-                          fit: BoxFit.cover),
-                    )
-                  : const Icon(Icons.image,
-                      size: 80, color: PosAppTheme.primaryGreen),
+              child: ClipRRect(
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(16)),
+              child: ProductImage(
+                path: product.imagePath,
+                fit: BoxFit.cover,
+                placeholderIcon: Icons.image,
+                placeholderColor: PosAppTheme.primaryGreen,
+                placeholderSize: 80,
+              ),
+            ),
             ),
             Padding(
               padding: const EdgeInsets.all(24),
@@ -1329,8 +1690,7 @@ class _PosScreenState extends State<PosScreen> {
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
-                          'Stock: ${MoneyCalculator.formatQty(product.quantity, byWeight: product.soldByWeight)}'
-                          '${product.soldByWeight ? ' kg' : ''}',
+                          'Stock: ${product.soldByWeight ? '${MoneyCalculator.formatQty(product.quantity, byWeight: true)} kg' : product.stockLabel(product.quantity)}',
                           style: TextStyle(
                             color: product.quantity > 0
                                 ? Colors.green
@@ -1376,8 +1736,22 @@ class _PosScreenState extends State<PosScreen> {
   Widget _buildProductCard(dynamic product) {
     final responsive = context.responsive;
     final isAvailable = product.quantity > 0;
-    final isExpiringSoon = product.isExpiringSoon;
-    final isExpired = product.isExpired;
+    // Expiry warnings come from the item's closest stocked batch (the same
+    // product received on different dates has different lots), falling back
+    // to the product-level date if one was ever set. The card only turns red
+    // when EVERY remaining lot is already expired — mixed lots with a fresh
+    // one still on sale just show the "Exp:" badge.
+    final prodProvider = context.read<ProductProvider>();
+    final nextExpiry = prodProvider.soonestExpiryFor(product.id) ??
+        (product.expiryDate as DateTime?);
+    final latestExpiry = prodProvider.latestExpiryFor(product.id) ??
+        (product.expiryDate as DateTime?);
+    final now = DateTime.now();
+    final isExpired =
+        latestExpiry != null && latestExpiry.isBefore(now);
+    final daysUntil = nextExpiry?.difference(now).inDays;
+    final isExpiringSoon =
+        !isExpired && daysUntil != null && daysUntil >= 0 && daysUntil <= 7;
 
     return GestureDetector(
       onTap: () => _addProductToCart(product),
@@ -1409,22 +1783,15 @@ class _PosScreenState extends State<PosScreen> {
                   alignment: Alignment.center,
                   children: [
                     // Product Image or Placeholder
-                    if (product.imagePath != null &&
-                        product.imagePath!.isNotEmpty &&
-                        File(product.imagePath!).existsSync())
-                      Image.file(
-                        File(product.imagePath!),
-                        fit: BoxFit.cover,
-                        width: double.infinity,
-                      )
-                    else
-                      Icon(
-                        Icons.image,
-                        color: isAvailable
-                            ? PosAppTheme.primaryGreen
-                            : Colors.grey,
-                        size: responsive.iconLarge,
-                      ),
+                    ProductImage(
+                      path: product.imagePath,
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                      placeholderIcon: Icons.image,
+                      placeholderColor:
+                          isAvailable ? PosAppTheme.primaryGreen : Colors.grey,
+                      placeholderSize: responsive.iconLarge,
+                    ),
                     if (isExpired)
                       Container(
                         color: Colors.red.withOpacity(0.5),
@@ -1495,7 +1862,7 @@ class _PosScreenState extends State<PosScreen> {
                         SizedBox(height: responsive.paddingXSmall),
                         if (isExpiringSoon)
                           Text(
-                            'Exp: ${product.daysUntilExpiry} days',
+                            'Exp: $daysUntil days',
                             style: TextStyle(
                               fontSize: responsive.bodyTiny,
                               color: Colors.orange,
@@ -1505,8 +1872,7 @@ class _PosScreenState extends State<PosScreen> {
                         else
                           Text(
                             isAvailable
-                                ? 'Stock: ${MoneyCalculator.formatQty(product.quantity, byWeight: product.soldByWeight)}'
-                                    '${product.soldByWeight ? ' kg' : ''}'
+                                ? 'Stock: ${product.soldByWeight ? '${MoneyCalculator.formatQty(product.quantity, byWeight: true)} kg' : product.stockLabel(product.quantity)}'
                                 : 'Out of Stock',
                             style: TextStyle(
                               fontSize: responsive.bodySmall,
@@ -1567,6 +1933,21 @@ class _PosScreenState extends State<PosScreen> {
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
                     ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                TextButton.icon(
+                  onPressed: _showBagDialog,
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    minimumSize: const Size(0, 32),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  icon: const Icon(Icons.shopping_bag, size: 16),
+                  label: const Text(
+                    'Bag',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
                   ),
                 ),
                 const Spacer(),
@@ -1679,20 +2060,18 @@ class _PosScreenState extends State<PosScreen> {
                     borderRadius: BorderRadius.circular(4),
                     border: Border.all(color: Colors.grey[300]!),
                   ),
-                  child: cartItem.product.imagePath != null &&
-                          cartItem.product.imagePath!.isNotEmpty &&
-                          File(cartItem.product.imagePath!).existsSync()
-                      ? ClipRRect(
+                  child: ClipRRect(
                           borderRadius: BorderRadius.circular(3),
-                          child: Image.file(
-                            File(cartItem.product.imagePath!),
+                          child: ProductImage(
+                            path: cartItem.product.imagePath,
                             fit: BoxFit.cover,
+                            width: 70,
+                            height: 70,
+                            placeholderIcon:
+                                Icons.image_not_supported_outlined,
+                            placeholderColor: Colors.grey[400],
+                            placeholderSize: 30,
                           ),
-                        )
-                      : Icon(
-                          Icons.image_not_supported_outlined,
-                          size: 30,
-                          color: Colors.grey[400],
                         ),
                 ),
                 SizedBox(width: responsive.paddingSmall),
@@ -1713,7 +2092,7 @@ class _PosScreenState extends State<PosScreen> {
                       SizedBox(height: responsive.paddingXSmall),
                       Text(
                         'Rs. ${cartItem.unitPrice.toStringAsFixed(2)}'
-                        '${cartItem.product.soldByWeight ? ' /kg' : ''}',
+                        '${cartItem.product.soldByWeight ? ' /kg' : cartItem.loose ? ' /pc' : cartItem.isBox ? ' /box' : ''}',
                         style: TextStyle(
                           fontSize: responsive.bodySmall,
                           color: PosAppTheme.textGray,
@@ -1732,7 +2111,7 @@ class _PosScreenState extends State<PosScreen> {
                     onTap: () {
                       context
                           .read<SalesProvider>()
-                          .removeFromCart(cartItem.product.id);
+                          .removeFromCart(cartItem.id);
                     },
                     child: const Padding(
                       padding: EdgeInsets.all(8),
@@ -1764,7 +2143,7 @@ class _PosScreenState extends State<PosScreen> {
                             context
                                 .read<SalesProvider>()
                                 .updateCartItemQuantity(
-                                  cartItem.product.id,
+                                  cartItem.id,
                                   cartItem.quantity - step,
                                 );
                           } else {
@@ -1772,7 +2151,7 @@ class _PosScreenState extends State<PosScreen> {
                             // line entirely.
                             context
                                 .read<SalesProvider>()
-                                .removeFromCart(cartItem.product.id);
+                                .removeFromCart(cartItem.id);
                           }
                         },
                       ),
@@ -1785,7 +2164,7 @@ class _PosScreenState extends State<PosScreen> {
                                   await context
                                       .read<SalesProvider>()
                                       .updateCartItemQuantity(
-                                        cartItem.product.id,
+                                        cartItem.id,
                                         w,
                                       );
                                 }
@@ -1796,8 +2175,7 @@ class _PosScreenState extends State<PosScreen> {
                             horizontal: responsive.paddingSmall,
                           ),
                           child: Text(
-                            '${MoneyCalculator.formatQty(cartItem.quantity, byWeight: cartItem.product.soldByWeight)}'
-                            '${cartItem.product.soldByWeight ? ' kg' : ''}',
+                            _cartLineQtyLabel(cartItem),
                             style: TextStyle(
                               fontWeight: FontWeight.bold,
                               fontSize: responsive.bodyMedium,
@@ -1812,7 +2190,7 @@ class _PosScreenState extends State<PosScreen> {
                           final step =
                               cartItem.product.soldByWeight ? 0.25 : 1.0;
                           context.read<SalesProvider>().updateCartItemQuantity(
-                                cartItem.product.id,
+                                cartItem.id,
                                 cartItem.quantity + step,
                               );
                         },
@@ -1834,6 +2212,24 @@ class _PosScreenState extends State<PosScreen> {
         ),
       ),
     );
+  }
+
+  /// Cart-line quantity with its selling unit:
+  /// "0.500 kg" (weight), "3 pcs" (loose pieces), "2 boxes" (whole boxes),
+  /// or a plain number for ordinary products.
+  String _cartLineQtyLabel(dynamic item) {
+    if (item.product.soldByWeight == true) {
+      return '${MoneyCalculator.formatQty(item.quantity, byWeight: true)} kg';
+    }
+    if (item.loose == true) {
+      final n = MoneyCalculator.formatQty(item.quantity);
+      return '$n pc${item.quantity == 1 ? '' : 's'}';
+    }
+    if (item.isBox == true) {
+      final n = MoneyCalculator.formatQty(item.quantity);
+      return '$n box${item.quantity == 1 ? '' : 'es'}';
+    }
+    return MoneyCalculator.formatQty(item.quantity);
   }
 
   Widget _buildPaymentSection() {

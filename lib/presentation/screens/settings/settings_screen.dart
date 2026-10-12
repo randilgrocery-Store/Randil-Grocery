@@ -12,10 +12,12 @@ import 'package:win32/win32.dart';
 import '../../../core/utils/secure_storage.dart';
 
 import '../../../data/database/database_service.dart';
+import '../../../data/models/shop_settings.dart';
 import '../../../data/models/user.dart';
 import '../../../data/services/backup_service.dart';
 import '../../../data/services/cash_drawer_service.dart';
 import '../../../data/services/print_service.dart';
+import '../../../data/services/scale_barcode.dart';
 import '../../../data/services/supabase_sync_service.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/network_provider.dart';
@@ -105,9 +107,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _serverIpFallbackController;
   late TextEditingController _cloudUrlController;
   late TextEditingController _cloudAnonController;
+  late TextEditingController _scalePrefixController;
+  late TextEditingController _scaleLengthController;
+  late TextEditingController _scaleItemLengthController;
+  late TextEditingController _scaleTestController;
   bool _enableGoogleDriveBackup = false;
   bool _enableCloudSync = false;
   bool _cloudBusy = false;
+  String? _scaleTestResult;
   List<String> _printers = [];
   bool _printersLoaded = false;
 
@@ -185,6 +192,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final cloud = SupabaseSyncService.instance;
     _cloudUrlController = TextEditingController(text: cloud.url);
     _cloudAnonController = TextEditingController(text: cloud.anonKey);
+    _scalePrefixController =
+        TextEditingController(text: settings.scaleBarcodePrefix);
+    _scaleLengthController =
+        TextEditingController(text: settings.scaleBarcodeLength.toString());
+    _scaleItemLengthController = TextEditingController(
+        text: settings.scaleBarcodeItemLength.toString());
+    _scaleTestController = TextEditingController();
     _enableCloudSync = cloud.enabled;
     _enableGoogleDriveBackup = settings.enableGoogleDriveBackup;
 
@@ -253,6 +267,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _serverIpFallbackController.dispose();
     _cloudUrlController.dispose();
     _cloudAnonController.dispose();
+    _scalePrefixController.dispose();
+    _scaleLengthController.dispose();
+    _scaleItemLengthController.dispose();
+    _scaleTestController.dispose();
     super.dispose();
   }
 
@@ -516,6 +534,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return _buildTechnicalPane();
       case 8:
         return _buildCashDrawerSettings();
+      case 9:
+        return _buildScaleBarcodePane();
       default:
         return _buildAbout();
     }
@@ -827,6 +847,17 @@ Row(
                             ),
                           ),
                         ],
+                        if (network.lastFinancialSyncAt != null) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            'Money synced: '
+                            '${network.lastFinancialSyncAt!.toLocal()}',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: PosAppTheme.textGray,
+                            ),
+                          ),
+                        ],
                         if (network.pendingCount > 0) ...[
                           const SizedBox(height: 4),
                           Text(
@@ -878,6 +909,49 @@ Row(
                     ),
                   ],
                 ),
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: PosAppTheme.warningOrange.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: PosAppTheme.warningOrange.withOpacity(0.3),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Reset reports (keeps items & stock)',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        isServer
+                            ? 'Clears every bill, expense, wastage and reload '
+                                'card record on all PCs. Products, images, '
+                                'customers and current stock are kept.'
+                            : 'Clears every bill, expense, wastage and reload '
+                                'card record on the server and on this PC. '
+                                'Products, images and stock are kept.',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: PosAppTheme.textGray,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: OutlinedButton.icon(
+                          onPressed: _confirmResetReports,
+                          icon: const Icon(Icons.restart_alt),
+                          label: const Text('Reset Reports'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ],
           ),
@@ -888,6 +962,40 @@ Row(
 
   Future<void> _saveNetworkMode(bool? isServerMode) async {
     await _saveNetworkFields(isServerMode: isServerMode);
+  }
+
+  /// Wipes bills/expenses/wastage everywhere, after an explicit confirmation.
+  /// Deliberately not a full data reset: items, images and stock stay.
+  Future<void> _confirmResetReports() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reset reports?'),
+        content: const Text(
+          'This clears the sales history, expenses, wastage and reload card '
+          'records that the daily, monthly and profit reports are built from, '
+          'on BOTH PCs.\n\n'
+          'Your products, images, customers and current stock quantities are '
+          'NOT touched. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final message = await context.read<NetworkProvider>().resetReports();
+    if (mounted) {
+      showTopSnackBar(context, SnackBar(content: Text(message)));
+    }
   }
 
   Future<void> _saveNetworkFields({bool? isServerMode}) async {
@@ -1370,9 +1478,10 @@ Row(
                       if (settings.cashDrawerEnabled) ...[
                         const SizedBox(height: AppSpacing.md),
                         _buildSettingToggleTile(
-                          title: 'Card-only payments only',
-                          subtitle: 'Keep the drawer shut on cash sales; open it '
-                              'for card-only bills',
+                          title: 'Open drawer for card-only bills',
+                          subtitle: 'ON: card-only payments also pop the till. '
+                              'OFF: keep the drawer shut on card-only sales — '
+                              'cash and split payments always open it',
                           icon: Icons.credit_card,
                           value: settings.cashDrawerOpenOnCardOnly,
                           onChanged: (value) {
@@ -2477,6 +2586,413 @@ Row(
     return sameDay ? 'Today, $hm' : '${local.day}/${local.month} $hm';
   }
 
+  // -------------------------------------------------------------------------
+  // Label-printing scale (weighing scale barcode decoding)
+  // -------------------------------------------------------------------------
+
+  Widget _buildScaleBarcodePane() => Consumer<SettingsProvider>(
+        builder: (context, settingsProvider, child) {
+          final settings = settingsProvider.settings;
+          final colors = context.appColors;
+          final t = context.typography;
+          final bool isServer = settings.isServerMode;
+          final int prefixLen = _scalePrefixController.text.trim().length;
+          final int total =
+              int.tryParse(_scaleLengthController.text.trim()) ?? 12;
+          final int itemLen =
+              int.tryParse(_scaleItemLengthController.text.trim()) ?? 5;
+          final int valueLen =
+              total - prefixLen - itemLen - (settings.scaleBarcodeCheckDigit ? 1 : 0);
+          return SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const AppSectionHeader(
+                  title: 'Label scale',
+                  subtitle: 'Add weighed items at the printed weight by scanning the label',
+                  icon: Icons.scale,
+                ),
+                AppCard(
+                  padding: const EdgeInsets.all(AppSpacing.md),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (!isServer)
+                        Container(
+                          width: double.infinity,
+                          margin: const EdgeInsets.only(bottom: AppSpacing.md),
+                          padding: const EdgeInsets.all(AppSpacing.sm),
+                          decoration: BoxDecoration(
+                            color: colors.primarySoft,
+                            borderRadius: AppRadius.controlRadius,
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.sync,
+                                size: 18,
+                                color: colors.onPrimarySoft,
+                              ),
+                              const SizedBox(width: AppSpacing.sm),
+                              Expanded(
+                                child: Text(
+                                  'This layout is set on the admin PC and copied '
+                                  'to this terminal automatically.',
+                                  style: t.caption,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      _buildSettingToggleTile(
+                        title: 'Decode scale labels',
+                        subtitle: settings.scaleBarcodeEnabled
+                            ? 'Scanned labels add the item at the weight printed on them'
+                            : 'Off — scale labels are treated as ordinary barcodes',
+                        icon: Icons.qr_code_scanner,
+                        value: settings.scaleBarcodeEnabled,
+                        onChanged: isServer
+                            ? (value) {
+                                settingsProvider.updateScaleBarcodeSettings(
+                                  enabled: value,
+                                );
+                                setState(() => _scaleTestResult = null);
+                              }
+                            : null,
+                      ),
+                      if (settings.scaleBarcodeEnabled) ...[
+                        const SizedBox(height: AppSpacing.md),
+                        if (!isServer) ...[
+                          Text('Current layout', style: t.bodyStrong),
+                          const SizedBox(height: AppSpacing.xxs),
+                          Text(
+                            'Prefix ${settings.scaleBarcodePrefix} · '
+                            '${settings.scaleBarcodeLength} digits · '
+                            '${settings.scaleBarcodeItemLength} item/PLU · '
+                            '${settings.scaleBarcodePriceMode ? 'price (Rs.)' : 'weight (kg)'}'
+                            ' · ${settings.scaleBarcodeCheckDigit ? 'check digit' : 'no check digit'}',
+                            style: t.body,
+                          ),
+                        ] else ...[
+                        Text(
+                          'Label layout',
+                          style: t.bodyStrong,
+                        ),
+                        const SizedBox(height: AppSpacing.xxs),
+                        Text(
+                          'Match these to the numbers your ABD-90 prints. '
+                          'Example: a 12-digit label is 1 prefix + '
+                          '$itemLen item + $valueLen value + 1 check digit.',
+                          style: t.caption.copyWith(
+                            color: colors.textTertiary,
+                          ),
+                        ),
+                        const SizedBox(height: AppSpacing.sm),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: GroceryTextField(
+                                label: 'Prefix digits',
+                                controller: _scalePrefixController,
+                                keyboardType: TextInputType.number,
+                                hint: '2',
+                              ),
+                            ),
+                            const SizedBox(width: AppSpacing.sm),
+                            Expanded(
+                              child: GroceryTextField(
+                                label: 'Total digits',
+                                controller: _scaleLengthController,
+                                keyboardType: TextInputType.number,
+                                hint: '12',
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: AppSpacing.md),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: GroceryTextField(
+                                label: 'Item/PLU digits',
+                                controller: _scaleItemLengthController,
+                                keyboardType: TextInputType.number,
+                                hint: '5',
+                              ),
+                            ),
+                            const SizedBox(width: AppSpacing.sm),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Value carries',
+                                    style: t.caption.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(height: AppSpacing.xxs),
+                                  DropdownButtonFormField<bool>(
+                                    initialValue: settings.scaleBarcodePriceMode,
+                                    isExpanded: true,
+                                    decoration: InputDecoration(
+                                      isDense: true,
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                        horizontal: AppSpacing.sm,
+                                        vertical: 10,
+                                      ),
+                                      border: OutlineInputBorder(
+                                        borderRadius: AppRadius.controlRadius,
+                                      ),
+                                    ),
+                                    items: const [
+                                      DropdownMenuItem(
+                                        value: false,
+                                        child: Text('Weight (kg)'),
+                                      ),
+                                      DropdownMenuItem(
+                                        value: true,
+                                        child: Text('Price (Rs.)'),
+                                      ),
+                                    ],
+                                    onChanged: (value) {
+                                      if (value != null) {
+                                        settingsProvider
+                                            .updateScaleBarcodeSettings(
+                                          priceMode: value,
+                                        );
+                                        setState(() => _scaleTestResult = null);
+                                      }
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: AppSpacing.sm),
+                        _buildSettingToggleTile(
+                          title: 'Last digit is a check digit',
+                          subtitle: 'Most scales end the barcode with an '
+                              'EAN/UPC check digit',
+                          icon: Icons.tag,
+                          value: settings.scaleBarcodeCheckDigit,
+                          onChanged: (value) {
+                            settingsProvider.updateScaleBarcodeSettings(
+                              checkDigit: value,
+                            );
+                            setState(() => _scaleTestResult = null);
+                          },
+                        ),
+                        const SizedBox(height: AppSpacing.md),
+                        Row(
+                          children: [
+                            if (valueLen < 1)
+                              Expanded(
+                                child: Text(
+                                  'These digits do not fit — reduce the '
+                                  'item or total digits.',
+                                  style: t.caption.copyWith(
+                                    color: colors.danger,
+                                  ),
+                                ),
+                              )
+                            else
+                              const Spacer(),
+                            const SizedBox(width: AppSpacing.sm),
+                            ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                minimumSize: const Size(48, 44),
+                              ),
+                              onPressed: () => _saveScaleLayout(settingsProvider),
+                              icon: const Icon(Icons.save),
+                              label: const Text('Save layout'),
+                            ),
+                          ],
+                        ),
+                        ],
+                        Divider(color: colors.border),
+                        const SizedBox(height: AppSpacing.sm),
+                        Text('Test a label', style: t.bodyStrong),
+                        const SizedBox(height: AppSpacing.xxs),
+                        Text(
+                          'Print one label from the scale and scan (or type) '
+                          'the barcode here to confirm the POS reads it.',
+                          style: t.caption.copyWith(
+                            color: colors.textTertiary,
+                          ),
+                        ),
+                        const SizedBox(height: AppSpacing.sm),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: GroceryTextField(
+                                label: 'Label barcode',
+                                controller: _scaleTestController,
+                                keyboardType: TextInputType.number,
+                                hint: 'e.g. 210001005007',
+                              ),
+                            ),
+                            const SizedBox(width: AppSpacing.sm),
+                            OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(
+                                minimumSize: const Size(48, 44),
+                              ),
+                              onPressed: () =>
+                                  _runScaleTest(useControllers: isServer),
+                              icon: const Icon(Icons.play_arrow),
+                              label: const Text('Test'),
+                            ),
+                          ],
+                        ),
+                        if (_scaleTestResult != null) ...[
+                          const SizedBox(height: AppSpacing.sm),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(AppSpacing.sm),
+                            decoration: BoxDecoration(
+                              color: colors.surfaceMuted,
+                              borderRadius: AppRadius.controlRadius,
+                              border: Border.all(color: colors.border),
+                            ),
+                            child: Text(_scaleTestResult!, style: t.body),
+                          ),
+                        ],
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+
+  Future<void> _saveScaleLayout(SettingsProvider provider) async {
+    final prefix = _scalePrefixController.text.trim();
+    final total = int.tryParse(_scaleLengthController.text.trim());
+    final item = int.tryParse(_scaleItemLengthController.text.trim());
+    if (prefix.isEmpty || total == null || item == null) {
+      showTopSnackBar(context,
+        const SnackBar(
+          content: Text('Enter the prefix, total digits and item digits'),
+          backgroundColor: PosAppTheme.warningOrange,
+        ),
+      );
+      return;
+    }
+    await provider.updateScaleBarcodeSettings(
+      prefix: prefix,
+      length: total,
+      itemLength: item,
+    );
+    if (mounted) {
+      setState(() => _scaleTestResult = null);
+      showTopSnackBar(context,
+        SnackBar(
+          content: const Text('Label layout saved'),
+          backgroundColor: context.appColors.success,
+        ),
+      );
+    }
+  }
+
+  /// Decodes the test barcode exactly the way the POS does, so the layout can
+  /// be confirmed before it is relied on at the counter. The layout is read
+  /// fresh from the database — the same copy the POS itself uses — so a layout
+  /// just synced from the admin PC is honoured without restarting the app. On
+  /// the admin PC the current (possibly unsaved) fields are used so a layout can
+  /// be tried before saving.
+  Future<void> _runScaleTest({bool useControllers = true}) async {
+    ShopSettings newest;
+    try {
+      newest = await DatabaseService().getShopSettings();
+    } catch (_) {
+      newest = context.read<SettingsProvider>().settings;
+    }
+    final total = useControllers
+        ? (int.tryParse(_scaleLengthController.text.trim()) ??
+            newest.scaleBarcodeLength)
+        : newest.scaleBarcodeLength;
+    final itemLen = useControllers
+        ? (int.tryParse(_scaleItemLengthController.text.trim()) ??
+            newest.scaleBarcodeItemLength)
+        : newest.scaleBarcodeItemLength;
+    final prefix =
+        useControllers ? _scalePrefixController.text.trim() : newest.scaleBarcodePrefix;
+    final code = _scaleTestController.text.trim();
+    final config = ScaleBarcodeConfig(
+      enabled: true,
+      prefix: prefix,
+      totalLength: total,
+      itemLength: itemLen,
+      priceMode: newest.scaleBarcodePriceMode,
+      checkDigit: newest.scaleBarcodeCheckDigit,
+    );
+
+    String result;
+    if (code.isEmpty) {
+      result = 'Type or scan a label barcode to test.';
+    } else if (!RegExp(r'^[0-9]+$').hasMatch(code)) {
+      result = 'Not a scale barcode: it contains characters other than digits.';
+    } else if (code.length != total) {
+      result = 'Not a scale barcode: your layout expects $total digits, '
+          'but this code has ${code.length}.';
+    } else if (prefix.isNotEmpty && !code.startsWith(prefix)) {
+      final shown =
+          code.substring(0, prefix.length <= code.length ? prefix.length : code.length);
+      result = 'Prefix mismatch: this barcode starts with "$shown" but the '
+          'saved layout expects "$prefix". '
+          '${useControllers ? 'Fix the Prefix digits and Save layout.' : 'Fix the Prefix on the admin PC.'}';
+    } else {
+      final db = DatabaseService();
+      Future<dynamic> lookup(String c) async {
+        final found = await db.getProductByCode(c);
+        if (found != null) return found;
+        return db.getProductByBarcodeLoose(c);
+      }
+
+      String? matched;
+      String? firstDecoded;
+      for (final il in ScaleBarcodeParser.candidateItemLengths(config)) {
+        final parsed =
+            ScaleBarcodeParser.decode(code, config, itemLength: il);
+        if (parsed == null) continue;
+        final product = await lookup(parsed.itemCode);
+        if (product == null) {
+          firstDecoded ??= parsed.priceMode
+              ? 'item "${parsed.itemCode}" (price Rs. '
+                  '${parsed.price.toStringAsFixed(2)})'
+              : 'item "${parsed.itemCode}" at '
+                  '${parsed.weightKg.toStringAsFixed(3)} kg';
+          continue;
+        }
+        if (parsed.priceMode) {
+          matched = 'Item ${parsed.itemCode} → ${product.name}\n'
+              'Encoding price Rs. ${parsed.price.toStringAsFixed(2)}';
+        } else {
+          matched = 'Item ${parsed.itemCode} → ${product.name}\n'
+              'Encoding weight ${parsed.weightKg.toStringAsFixed(3)} kg';
+        }
+        break;
+      }
+      result = matched ??
+          (firstDecoded != null
+              ? 'Scale label read as $firstDecoded, but no product has that '
+                  'barcode. Add the product in Inventory with that exact '
+                  'barcode (and turn on "Sold by weight").'
+              : 'This looks like a scale barcode, but no product matches the '
+                  'item code inside it. Make the scale item code equal to the '
+                  'product barcode in Inventory, and check the item/PLU digit '
+                  'count.');
+    }
+
+    if (mounted) {
+      setState(() => _scaleTestResult = result);
+    }
+  }
+
   /// Technical diagnostics. Collapses to an admin-only lock for non-admins;
   /// for admins it shows real, provider/service-sourced values only (version
   /// read from the EXE resource via win32, never a hardcoded string).
@@ -2689,7 +3205,7 @@ Row(
     required String subtitle,
     required IconData icon,
     required bool value,
-    required ValueChanged<bool> onChanged,
+    ValueChanged<bool>? onChanged,
   }) {
     final colors = context.appColors;
     final t = context.typography;
@@ -2777,6 +3293,7 @@ const _navSections = <_SettingsNavSection>[
     _SettingsNavItem(Icons.store, 'Shop settings', 0),
     _SettingsNavItem(Icons.print, 'Printer', 1),
     _SettingsNavItem(Icons.lan, 'Network', 2),
+    _SettingsNavItem(Icons.scale, 'Label scale', 9),
   ]),
   _SettingsNavSection('People', [
     _SettingsNavItem(Icons.people_alt, 'Users', 3),

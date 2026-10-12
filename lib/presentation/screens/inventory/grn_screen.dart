@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/constants/responsive.dart';
+import '../../../data/database/database_service.dart';
 import '../../../data/models/goods_received_note.dart';
 import '../../../data/models/product.dart';
 import '../../../data/models/supplier.dart';
@@ -30,6 +31,13 @@ class _GrnScreenState extends State<GrnScreen>
   bool _saving = false;
   bool _grnRequired = true;
 
+  /// Always-focused box at the top of the Receive tab. A hand-held scanner
+  /// "types" the barcode and presses Enter, which fires [_handleScan] — the
+  /// item is added straight to the GRN, no dropdown, no extra dialog.
+  final TextEditingController _scanController = TextEditingController();
+  final FocusNode _scanFocus = FocusNode();
+  String? _lastScan;
+
   @override
   void initState() {
     super.initState();
@@ -49,6 +57,8 @@ class _GrnScreenState extends State<GrnScreen>
     _tabController.dispose();
     _grnNumberController.dispose();
     _notesController.dispose();
+    _scanController.dispose();
+    _scanFocus.dispose();
     super.dispose();
   }
 
@@ -228,8 +238,12 @@ class _GrnScreenState extends State<GrnScreen>
                                       child: Text(s.name),
                                     ),
                                 ],
-                                onChanged: (value) =>
-                                    setState(() => _supplierId = value),
+                                onChanged: (value) {
+                                  setState(() => _supplierId = value);
+                                  // Keep the scanner working: after choosing a
+                                  // supplier, put the cursor back in the scan box.
+                                  _scanFocus.requestFocus();
+                                },
                               )
                             : TextField(
                                 readOnly: true,
@@ -272,6 +286,8 @@ class _GrnScreenState extends State<GrnScreen>
             ),
           ),
           SizedBox(height: responsive.paddingMedium),
+          _scanField(),
+          SizedBox(height: responsive.paddingMedium),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -290,14 +306,7 @@ class _GrnScreenState extends State<GrnScreen>
                         ? null
                         : () => _addItemDialog(products),
                     icon: const Icon(Icons.add),
-                    label: const Text('Add Item'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: _lines.isEmpty
-                        ? null
-                        : () => _scanItemDialog(products),
-                    icon: const Icon(Icons.qr_code_scanner),
-                    label: const Text('Scan'),
+                    label: const Text('Add Item (manual)'),
                   ),
                 ],
               ),
@@ -328,27 +337,43 @@ class _GrnScreenState extends State<GrnScreen>
                     DataColumn(label: Text('Cost')),
                     DataColumn(label: Text('Sell')),
                     DataColumn(label: Text('Total')),
-                    DataColumn(label: Text('')),
+                    DataColumn(label: Text('Actions')),
                   ],
                   rows: [
-                    for (final line in _lines)
+                    for (var i = 0; i < _lines.length; i++)
                       DataRow(cells: [
-                        DataCell(Text(line.product.name)),
+                        DataCell(Text(_lines[i].product.name)),
                         DataCell(Text(
-                          line.batchNumber.isEmpty
+                          _lines[i].batchNumber.isEmpty
                               ? _grnNumberController.text
-                              : line.batchNumber,
+                              : _lines[i].batchNumber,
                         )),
-                        DataCell(Text(fmtQty(line.quantity))),
-                        DataCell(Text('$symbol ${line.costPrice.toStringAsFixed(2)}')),
-                        DataCell(
-                            Text('$symbol ${line.sellingPrice.toStringAsFixed(2)}')),
-                        DataCell(
-                            Text('$symbol ${line.lineTotal.toStringAsFixed(2)}')),
-                        DataCell(IconButton(
-                          icon: const Icon(Icons.delete_outline,
-                              color: PosAppTheme.dangerRed),
-                          onPressed: () => setState(() => _lines.remove(line)),
+                        DataCell(Text(fmtQty(_lines[i].quantity))),
+                        DataCell(Text(
+                            '$symbol ${_lines[i].costPrice.toStringAsFixed(2)}')),
+                        DataCell(Text(
+                            '$symbol ${_lines[i].sellingPrice.toStringAsFixed(2)}')),
+                        DataCell(Text(
+                            '$symbol ${_lines[i].lineTotal.toStringAsFixed(2)}')),
+                        DataCell(Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Edit quantity / prices / expiry',
+                              icon: const Icon(Icons.edit_outlined,
+                                  color: PosAppTheme.accentBlue),
+                              onPressed: () => _addItemDialog(products,
+                                  initialProduct: _lines[i].product,
+                                  replaceIndex: i),
+                            ),
+                            IconButton(
+                              tooltip: 'Remove',
+                              icon: const Icon(Icons.delete_outline,
+                                  color: PosAppTheme.dangerRed),
+                              onPressed: () =>
+                                  setState(() => _lines.removeAt(i)),
+                            ),
+                          ],
                         )),
                       ]),
                   ],
@@ -483,25 +508,40 @@ class _GrnScreenState extends State<GrnScreen>
     );
   }
 
-  // ── Add item dialog ────────────────────────────────────────────
+  // ── Add / edit item dialog ─────────────────────────────────────
   Future<void> _addItemDialog(List<Product> products,
-      {Product? initialProduct}) async {
-    Product? selected = initialProduct;
-    final qtyController = TextEditingController(text: '1');
+      {Product? initialProduct, int? replaceIndex}) async {
+    final existing = replaceIndex != null ? _lines[replaceIndex] : null;
+    Product? selected = existing?.product ?? initialProduct;
+
+    // The dropdown's value must be one of its items. A scanned product may not
+    // be in the in-memory list yet, so fold it in — otherwise Flutter throws.
+    final dropdownItems = <Product>[...products];
+    if (selected != null &&
+        !dropdownItems.any((p) => p.id == selected!.id)) {
+      dropdownItems.add(selected);
+    }
+
+    final qtyController = TextEditingController(
+      text: existing != null ? fmtQty(existing.quantity) : '1',
+    );
     final costController = TextEditingController(
-      text: initialProduct?.buyingPrice.toStringAsFixed(2) ?? '',
+      text: (existing?.costPrice ?? initialProduct?.buyingPrice ?? 0)
+          .toStringAsFixed(2),
     );
     final sellController = TextEditingController(
-      text: initialProduct?.sellingPrice.toStringAsFixed(2) ?? '',
+      text: (existing?.sellingPrice ?? initialProduct?.sellingPrice ?? 0)
+          .toStringAsFixed(2),
     );
-    final batchController = TextEditingController();
-    DateTime? expiry;
+    final batchController =
+        TextEditingController(text: existing?.batchNumber ?? '');
+    DateTime? expiry = existing?.expiryDate;
 
     await showDialog<bool>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Add Item to GRN'),
+          title: Text(existing == null ? 'Add Item to GRN' : 'Edit GRN Item'),
           content: SizedBox(
             width: 460,
             child: SingleChildScrollView(
@@ -516,7 +556,7 @@ class _GrnScreenState extends State<GrnScreen>
                       prefixIcon: Icon(Icons.inventory_2),
                     ),
                     items: [
-                      for (final p in products)
+                      for (final p in dropdownItems)
                         DropdownMenuItem(value: p, child: Text(p.name)),
                     ],
                     onChanged: (value) {
@@ -627,19 +667,24 @@ class _GrnScreenState extends State<GrnScreen>
                   );
                   return;
                 }
+                final line = _GrnLine(
+                  product: selected!,
+                  quantity: qty,
+                  costPrice: cost,
+                  sellingPrice: sell,
+                  batchNumber: batchController.text.trim(),
+                  expiryDate: expiry,
+                );
                 setState(() {
-                  _lines.add(_GrnLine(
-                    product: selected!,
-                    quantity: qty,
-                    costPrice: cost,
-                    sellingPrice: sell,
-                    batchNumber: batchController.text.trim(),
-                    expiryDate: expiry,
-                  ));
+                  if (replaceIndex != null) {
+                    _lines[replaceIndex] = line;
+                  } else {
+                    _lines.add(line);
+                  }
                 });
                 Navigator.pop(dialogContext, true);
               },
-              child: const Text('Add'),
+              child: Text(replaceIndex != null ? 'Save' : 'Add'),
             ),
           ],
         ),
@@ -652,48 +697,129 @@ class _GrnScreenState extends State<GrnScreen>
     batchController.dispose();
   }
 
-  /// Quick "scan" dialog: type or scan a barcode and add that product with its
-  /// current prices pre-filled.
-  Future<void> _scanItemDialog(List<Product> products) async {
-    final controller = TextEditingController();
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Scan / Enter Item Code'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Barcode or item code',
-            prefixIcon: Icon(Icons.qr_code_scanner),
-          ),
-          onSubmitted: (value) async {
-            final code = value.trim().toLowerCase();
-            final match = products.cast<Product?>().firstWhere(
-                  (p) =>
-                      p!.barcode.toLowerCase() == code ||
-                      p.name.toLowerCase() == code,
-                  orElse: () => null,
-                );
-            if (match == null) {
-              showTopSnackBar(context, 
-                const SnackBar(content: Text('No matching product found')),
-              );
-              return;
-            }
-            Navigator.pop(dialogContext);
-            await _addItemDialog(products, initialProduct: match);
-          },
+  /// A permanently-visible scan box at the top of the Receive tab. A barcode
+  /// scanner behaves like a keyboard: it drops the code into the focused field
+  /// and presses Enter, which fires [_handleScan] — the item lands in the GRN
+  /// immediately. No product dropdown, no second dialog.
+  Widget _scanField() {
+    final last = _lastScan;
+    return Card(
+      color: PosAppTheme.lightGreen.withValues(alpha: 0.35),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _scanController,
+              focusNode: _scanFocus,
+              autofocus: true,
+              textInputAction: TextInputAction.done,
+              onSubmitted: _handleScan,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+              decoration: const InputDecoration(
+                labelText: 'Scan barcode to receive',
+                hintText:
+                    'Scan an item — it is added straight away (scan again for more)',
+                prefixIcon: Icon(Icons.qr_code_scanner),
+                border: InputBorder.none,
+              ),
+            ),
+            if (last != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 44, bottom: 6),
+                child: Text(
+                  last,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: PosAppTheme.textGray,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Close'),
-          ),
-        ],
       ),
     );
-    controller.dispose();
+  }
+
+  /// Resolves a scanned code and drops the item straight into the GRN with the
+  /// product's current buying/selling price. Scanning the same product again
+  /// simply adds another unit.
+  Future<void> _handleScan(String raw) async {
+    final code = raw.trim();
+    if (code.isEmpty) return;
+    final products = context.read<ProductProvider>().allProducts;
+    final match = await _resolveGrnProduct(products, code);
+    if (!mounted) return;
+    _scanController.clear();
+    _scanFocus.requestFocus();
+
+    if (match == null) {
+      setState(() => _lastScan = 'No product found for "$code"');
+      _snack('No product found for "$code"');
+      return;
+    }
+
+    setState(() {
+      final idx = _lines.indexWhere(
+          (l) => l.product.id == match.id && l.batchNumber.isEmpty);
+      if (idx >= 0) {
+        final existing = _lines[idx];
+        _lines[idx] = _GrnLine(
+          product: existing.product,
+          quantity: existing.quantity + 1,
+          costPrice: existing.costPrice,
+          sellingPrice: existing.sellingPrice,
+          batchNumber: existing.batchNumber,
+          expiryDate: existing.expiryDate,
+        );
+      } else {
+        _lines.add(_GrnLine(
+          product: match,
+          quantity: 1,
+          costPrice: match.buyingPrice,
+          sellingPrice: match.sellingPrice,
+        ));
+      }
+      final total = _lines
+          .where((l) => l.product.id == match.id)
+          .fold<double>(0, (sum, l) => sum + l.quantity);
+      _lastScan = 'Added ${match.name} — ${fmtQty(total)} in this GRN';
+    });
+  }
+
+  /// Resolves [code] to a product using the same lookup the POS uses: exact
+  /// barcode first, then the product name, then a leading-zero-tolerant match
+  /// (a scale label item `00010` and a product barcode `0000010` are the same
+  /// item). Falls back to the database so a freshly added product is found
+  /// even if the local in-memory list is not refreshed yet.
+  Future<Product?> _resolveGrnProduct(
+      List<Product> products, String code) async {
+    final trimmed = code.trim();
+    if (trimmed.isEmpty) return null;
+    final lower = trimmed.toLowerCase();
+    final stripped = trimmed.replaceFirst(RegExp(r'^0+'), '');
+    Product? zeroPadded;
+    for (final p in products) {
+      final b = p.barcode.trim().toLowerCase();
+      if (b == lower || p.name.toLowerCase() == lower) return p;
+      if (stripped.isNotEmpty) {
+        final bStripped = b.replaceFirst(RegExp(r'^0+'), '');
+        if (bStripped == stripped) zeroPadded ??= p;
+      }
+    }
+    if (zeroPadded != null) return zeroPadded;
+    try {
+      final direct = await DatabaseService().getProductByCode(trimmed);
+      if (direct != null) return direct;
+      return await DatabaseService().getProductByBarcodeLoose(trimmed);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _save() async {

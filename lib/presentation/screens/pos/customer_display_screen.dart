@@ -27,6 +27,9 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
   // Idle promo slideshow (only while the cart is empty)
   Timer? _promoTimer;
   int _promoIndex = 0;
+  // Keeps the window glued to the customer screen once placed.
+  Timer? _reassertTimer;
+  bool _placedOnTarget = false;
   static const _promos = [
     (
       icon: Icons.eco,
@@ -77,6 +80,11 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
         }
         return 'Success';
       }
+      if (call.method == 'reconfigure') {
+        // Main window wants us to (re)place ourselves on the customer screen.
+        unawaited(_configureWindow());
+        return 'Success';
+      }
       return null;
     });
 
@@ -95,6 +103,7 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
   @override
   void dispose() {
     _promoTimer?.cancel();
+    _reassertTimer?.cancel();
     super.dispose();
   }
 
@@ -113,17 +122,33 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
   /// Moves the customer window onto the secondary monitor and expands it to a
   /// true borderless fullscreen.
   ///
-  /// The move is done in two steps: first the window is relocated at its
-  /// current size so Windows finishes the per-monitor DPI change, then it is
-  /// sized to the monitor's exact physical bounds (any resolution/scaling).
+  /// Dual-screen POS boxes can deliver WM_DPICHANGED and show-order surprises
+  /// while a window hops monitors, so placement is retried until it verifiably
+  /// sits on the target screen, then re-asserted periodically so nothing can
+  /// drag it back to the main display.
   Future<void> _configureWindow() async {
     if (!Platform.isWindows) return;
+
+    for (var attempt = 0; attempt < 15; attempt++) {
+      if (await _placeOnTargetMonitor()) {
+        _placedOnTarget = true;
+        _startReassertTimer();
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+    debugPrint('CustomerDisplay: could not place window on second screen');
+  }
+
+  /// Single placement attempt: styles the window, hops it to the target
+  /// monitor and verifies it actually landed there.
+  Future<bool> _placeOnTargetMonitor() async {
     try {
       final target = DisplayService.secondary() ?? DisplayService.primary();
-      if (target == null) return;
+      if (target == null) return false;
 
       final handle = _findOwnWindow();
-      if (handle == 0) return;
+      if (handle == 0) return false;
 
       // Keep the customer screen out of the taskbar / alt-tab list.
       final exStyle = GetWindowLongPtr(handle, GWL_EXSTYLE);
@@ -141,7 +166,7 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
         ((style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP) & 0xFFFFFFFF,
       );
 
-      // Step 1: relocate (keep size) and let the DPI change settle.
+      // Step 1: relocate (keep size) and let any WM_DPICHANGED settle.
       SetWindowPos(
         handle,
         HWND_TOP,
@@ -163,8 +188,62 @@ class _CustomerDisplayScreenState extends State<CustomerDisplayScreen> {
         target.height,
         SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
       );
+
+      // Verify — Windows may have nudged the window after us.
+      final rect = calloc<RECT>();
+      try {
+        if (GetWindowRect(handle, rect) == 0) return false;
+        final r = rect.ref;
+        return (r.left - target.left).abs() <= 8 &&
+            (r.top - target.top).abs() <= 8 &&
+            ((r.right - r.left) - target.width).abs() <= 8 &&
+            ((r.bottom - r.top) - target.height).abs() <= 8;
+      } finally {
+        calloc.free(rect);
+      }
+    } catch (e) {
+      debugPrint('CustomerDisplay: window placement attempt failed: $e');
+      return false;
+    }
+  }
+
+  /// After the first successful placement, keeps the window glued to the
+  /// customer screen (recovers if Windows moves it back to the main display).
+  void _startReassertTimer() {
+    if (_reassertTimer != null) return;
+    _reassertTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && _placedOnTarget) {
+        unawaited(_reassertPlacement());
+      }
+    });
+  }
+
+  Future<void> _reassertPlacement() async {
+    try {
+      // Only glue the window when a real second screen exists; on a single
+      // monitor the preview can be moved freely.
+      if (DisplayService.secondary() == null) return;
+
+      final target = DisplayService.secondary()!;
+      final handle = _findOwnWindow();
+      if (handle == 0) return;
+
+      final rect = calloc<RECT>();
+      try {
+        if (GetWindowRect(handle, rect) == 0) return;
+        final r = rect.ref;
+        final onTarget = (r.left - target.left).abs() <= 8 &&
+            (r.top - target.top).abs() <= 8 &&
+            ((r.right - r.left) - target.width).abs() <= 8 &&
+            ((r.bottom - r.top) - target.height).abs() <= 8;
+        if (onTarget) return;
+      } finally {
+        calloc.free(rect);
+      }
+      debugPrint('CustomerDisplay: window drifted — re-placing on screen 2');
+      await _placeOnTargetMonitor();
     } catch (_) {
-      // Window placement is best-effort; the display still shows windowed.
+      // Best-effort only.
     }
   }
 

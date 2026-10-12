@@ -166,8 +166,13 @@ class BackupService {
   static bool _cloudQueued = false;
   static Timer? _cloudTimer;
 
+  /// Test-only: when false, [notifyTransaction] does nothing, so unit tests do
+  /// not write snapshots into the real data folder or start cloud-push timers.
+  static bool transactionNotificationsEnabled = true;
+
   /// Called by every write path in the app. Never throws, never blocks the UI.
   static void notifyTransaction(String kind) {
+    if (!transactionNotificationsEnabled) return;
     final now = DateTime.now();
     _publishStatus((s) => s.copyWith(
           lastTransactionAt: now,

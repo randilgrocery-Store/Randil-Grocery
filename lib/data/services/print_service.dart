@@ -407,9 +407,12 @@ class PrintService {
     alignedSmall('Tel: $developerPhone');
     alignedSmall(developerEmail);
 
-    // Kick the cash drawer (ESC p 0 <t1> <t2>), then feed + cut paper.
-    // Standard for TYSSO/EPSON-style drawers wired through the printer.
-    commands.addAll([esc, 0x70, 0x00, 0x32, 0xFA]); // drawer kick pulse
+    // The cash drawer is opened by the POS exactly once per sale through
+    // CashDrawerCoordinator (cash_drawer_service.dart), which applies the
+    // drawer settings and the drawer_events dedupe. No pulse is embedded in the
+    // receipt itself: embedding one made the till pop twice (once with the
+    // bill, once from the coordinator) on every printed sale, and it ignored
+    // the card-only setting.
     commands.addAll([esc, 0x64, 0x03]); // 3 line feeds
     commands.addAll([gs, 0x56, 0x42, 0x00]); // full cut
 

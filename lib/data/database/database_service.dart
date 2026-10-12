@@ -24,6 +24,7 @@ import '../models/sale.dart';
 import '../models/shop_settings.dart';
 import '../models/supplier.dart';
 import '../models/supplier_payment.dart';
+import '../models/supplier_return.dart';
 import '../models/user.dart';
 import '../models/wastage.dart';
 import '../services/backup_service.dart';
@@ -41,6 +42,20 @@ class DatabaseService {
   Future<Database> get database async {
     _database ??= await _initDB();
     return _database!;
+  }
+
+  /// Test-only: points the service at an already-open database (an in-memory
+  /// one in tests) and ensures the real schema exists on it, so the LAN mirror
+  /// rules can be exercised without touching the live shop database.
+  Future<void> debugUseDatabase(Database db) async {
+    _database = db;
+    await _createTables(db, 1);
+  }
+
+  /// Test-only: forgets the injected database so the next call re-opens the
+  /// real one.
+  void debugResetDatabase() {
+    _database = null;
   }
 
   Future<Database> _initDB() async {
@@ -350,6 +365,8 @@ class DatabaseService {
           reorderLevel INTEGER,
           imagePath TEXT,
           soldByWeight INTEGER NOT NULL DEFAULT 0,
+          piecesPerBox INTEGER NOT NULL DEFAULT 1,
+          singlePrice REAL NOT NULL DEFAULT 0,
           createdAt TEXT NOT NULL,
           updatedAt TEXT NOT NULL,
           FOREIGN KEY (categoryId) REFERENCES categories(id)
@@ -387,6 +404,20 @@ class DatabaseService {
       try {
         await db.execute(
           'ALTER TABLE products ADD COLUMN soldByWeight INTEGER NOT NULL DEFAULT 0',
+        );
+      } catch (e) {
+        // Column already exists
+      }
+      try {
+        await db.execute(
+          'ALTER TABLE products ADD COLUMN piecesPerBox INTEGER NOT NULL DEFAULT 1',
+        );
+      } catch (e) {
+        // Column already exists
+      }
+      try {
+        await db.execute(
+          'ALTER TABLE products ADD COLUMN singlePrice REAL NOT NULL DEFAULT 0',
         );
       } catch (e) {
         // Column already exists
@@ -491,6 +522,24 @@ class DatabaseService {
         )
       ''');
     }
+    // Migration: customers.updatedAt powers the LAN mirror so an edited contact
+    // reaches the other PC. Backfill from the closest date we already have.
+    try {
+      final columns = await db.rawQuery('PRAGMA table_info(customers)');
+      final hasUpdatedAt = columns.any((col) => col['name'] == 'updatedAt');
+      if (!hasUpdatedAt) {
+        await db.execute(
+          "ALTER TABLE customers ADD COLUMN updatedAt TEXT NOT NULL DEFAULT ''",
+        );
+        await db.execute(
+          "UPDATE customers SET updatedAt = "
+          "CASE WHEN lastPurchaseDate IS NOT NULL AND lastPurchaseDate != '' "
+          "THEN lastPurchaseDate ELSE createdAt END",
+        );
+      }
+    } catch (e) {
+      developer.log('Customer migration error: $e', name: 'DatabaseService');
+    }
     // NOTE: legacy creditBalance/loyaltyPoints columns on old databases are
     // intentionally left in place and ignored (feature removed).
 
@@ -532,6 +581,7 @@ class DatabaseService {
           supplierId TEXT NOT NULL,
           notes TEXT,
           createdAt TEXT NOT NULL,
+          updatedAt TEXT,
           FOREIGN KEY (productId) REFERENCES products(id),
           FOREIGN KEY (supplierId) REFERENCES suppliers(id),
           UNIQUE(productId, batchNumber)
@@ -556,6 +606,13 @@ class DatabaseService {
           // received quantity so bought/used reporting still makes sense.
           await db.execute(
             'UPDATE product_batches SET initialQuantity = quantity WHERE initialQuantity = 0',
+          );
+        }
+        if (!names.contains('updatedAt')) {
+          // In-place edits (an expiry date corrected later) bump this stamp so
+          // the LAN mirror clock moves and the other PC sees the change.
+          await db.execute(
+            'ALTER TABLE product_batches ADD COLUMN updatedAt TEXT',
           );
         }
       } catch (e) {
@@ -646,9 +703,29 @@ class DatabaseService {
           notes TEXT NOT NULL DEFAULT '',
           orderDate TEXT NOT NULL,
           receivedDate TEXT,
+          createdAt TEXT NOT NULL DEFAULT '',
           FOREIGN KEY (supplierId) REFERENCES suppliers(id)
         )
       ''');
+    } else {
+      // Migration: `createdAt` is when the order was entered (the user may
+      // back-date orderDate or the receiving screen may stamp a midnight
+      // receivedDate). The mirror clock is the latest of these, so an order
+      // created and received on the same machine still travels to the other PC.
+      try {
+        final columns = await db.rawQuery('PRAGMA table_info(purchase_orders)');
+        final names = columns.map((col) => col['name'] as String).toSet();
+        if (!names.contains('createdAt')) {
+          await db.execute(
+            'ALTER TABLE purchase_orders ADD COLUMN createdAt TEXT NOT NULL DEFAULT \'\'',
+          );
+          await db.execute(
+            'UPDATE purchase_orders SET createdAt = orderDate WHERE createdAt = \'\'',
+          );
+        }
+      } catch (e) {
+        developer.log('Purchase order migration error: $e', name: 'DatabaseService');
+      }
     }
 
     // Expenses Table (NEW)
@@ -662,9 +739,36 @@ class DatabaseService {
           amount REAL NOT NULL,
           expenseDate TEXT NOT NULL,
           notes TEXT NOT NULL DEFAULT '',
-          recordedBy TEXT NOT NULL DEFAULT ''
+          recordedBy TEXT NOT NULL DEFAULT '',
+          paidTo TEXT NOT NULL DEFAULT '',
+          createdAt TEXT NOT NULL DEFAULT ''
         )
       ''');
+    }
+    // Migration: expenses.createdAt is the record time (the user may back-date
+    // expenseDate), used by the LAN mirror to ship the row reliably.
+    try {
+      final columns = await db.rawQuery('PRAGMA table_info(expenses)');
+      final names = columns.map((col) => col['name'] as String).toSet();
+      final hasCreatedAt = names.contains('createdAt');
+      if (!hasCreatedAt) {
+        await db.execute(
+          "ALTER TABLE expenses ADD COLUMN createdAt TEXT NOT NULL DEFAULT ''",
+        );
+        await db.execute(
+          "UPDATE expenses SET createdAt = expenseDate WHERE createdAt = ''",
+        );
+      }
+      // Migration: 'paidTo' records whom the money was handed to (a supplier
+      // collecting from the drawer, a worker, the landlord...), so the owner
+      // can reconcile the cash drawer at the end of the day.
+      if (!names.contains('paidTo')) {
+        await db.execute(
+          "ALTER TABLE expenses ADD COLUMN paidTo TEXT NOT NULL DEFAULT ''",
+        );
+      }
+    } catch (e) {
+      developer.log('Expense migration error: $e', name: 'DatabaseService');
     }
 
     // Wastage Table (NEW)
@@ -684,9 +788,22 @@ class DatabaseService {
           recordedBy TEXT NOT NULL DEFAULT '',
           wastageDate TEXT NOT NULL,
           createdAt TEXT NOT NULL,
+          updatedAt TEXT,
           FOREIGN KEY (productId) REFERENCES products(id)
         )
       ''');
+    } else {
+      // Migration: an in-place edit (quantity, reason, date) bumps this stamp
+      // so the LAN mirror clock moves and the other PC sees the correction.
+      try {
+        final columns = await db.rawQuery('PRAGMA table_info(wastages)');
+        final names = columns.map((col) => col['name'] as String).toSet();
+        if (!names.contains('updatedAt')) {
+          await db.execute('ALTER TABLE wastages ADD COLUMN updatedAt TEXT');
+        }
+      } catch (e) {
+        developer.log('Wastage migration error: $e', name: 'DatabaseService');
+      }
     }
 
     // Supplier payments (cash / cheque made TO suppliers for goods received)
@@ -705,6 +822,29 @@ class DatabaseService {
           chequeDate TEXT,
           note TEXT NOT NULL DEFAULT '',
           paymentDate TEXT NOT NULL,
+          createdAt TEXT NOT NULL,
+          FOREIGN KEY (supplierId) REFERENCES suppliers(id)
+        )
+      ''');
+    }
+
+    // Supplier returns (goods sent BACK to a supplier; value is credited
+    // against the outstanding balance and stock is taken out of the shelves).
+    final supplierReturnsTableExists =
+        await _tableExists(db, 'supplier_returns');
+    if (!supplierReturnsTableExists) {
+      await db.execute('''
+        CREATE TABLE supplier_returns (
+          id TEXT PRIMARY KEY,
+          returnNumber TEXT NOT NULL DEFAULT '',
+          supplierId TEXT NOT NULL,
+          supplierName TEXT NOT NULL DEFAULT '',
+          items TEXT NOT NULL DEFAULT '[]',
+          total REAL NOT NULL DEFAULT 0,
+          reason TEXT NOT NULL DEFAULT '',
+          notes TEXT NOT NULL DEFAULT '',
+          returnedBy TEXT NOT NULL DEFAULT '',
+          returnDate TEXT NOT NULL,
           createdAt TEXT NOT NULL,
           FOREIGN KEY (supplierId) REFERENCES suppliers(id)
         )
@@ -740,6 +880,12 @@ class DatabaseService {
           cashDrawerPulseOffMs INTEGER NOT NULL DEFAULT 240,
           cashDrawerPrinterName TEXT NOT NULL DEFAULT '',
           cashDrawerOpenOnCardOnly INTEGER NOT NULL DEFAULT 1,
+          scaleBarcodeEnabled INTEGER NOT NULL DEFAULT 0,
+          scaleBarcodePrefix TEXT NOT NULL DEFAULT '2',
+          scaleBarcodeLength INTEGER NOT NULL DEFAULT 12,
+          scaleBarcodeItemLength INTEGER NOT NULL DEFAULT 5,
+          scaleBarcodePriceMode INTEGER NOT NULL DEFAULT 0,
+          scaleBarcodeCheckDigit INTEGER NOT NULL DEFAULT 1,
           updatedAt TEXT NOT NULL
         )
       ''');
@@ -830,6 +976,36 @@ class DatabaseService {
         if (!names.contains('cashDrawerOpenOnCardOnly')) {
           await db.execute(
             'ALTER TABLE shop_settings ADD COLUMN cashDrawerOpenOnCardOnly INTEGER NOT NULL DEFAULT 1',
+          );
+        }
+        if (!names.contains('scaleBarcodeEnabled')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN scaleBarcodeEnabled INTEGER NOT NULL DEFAULT 0',
+          );
+        }
+        if (!names.contains('scaleBarcodePrefix')) {
+          await db.execute(
+            "ALTER TABLE shop_settings ADD COLUMN scaleBarcodePrefix TEXT NOT NULL DEFAULT '2'",
+          );
+        }
+        if (!names.contains('scaleBarcodeLength')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN scaleBarcodeLength INTEGER NOT NULL DEFAULT 12',
+          );
+        }
+        if (!names.contains('scaleBarcodeItemLength')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN scaleBarcodeItemLength INTEGER NOT NULL DEFAULT 5',
+          );
+        }
+        if (!names.contains('scaleBarcodePriceMode')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN scaleBarcodePriceMode INTEGER NOT NULL DEFAULT 0',
+          );
+        }
+        if (!names.contains('scaleBarcodeCheckDigit')) {
+          await db.execute(
+            'ALTER TABLE shop_settings ADD COLUMN scaleBarcodeCheckDigit INTEGER NOT NULL DEFAULT 1',
           );
         }
       } catch (e) {
@@ -1021,6 +1197,37 @@ class DatabaseService {
     BackupService.notifyTransaction('category');
   }
 
+  /// Fixed name of the reserved category that holds shopping bags. Bags are
+  /// ordinary products inside this category so they get the same stock, FIFO
+  /// costing, bill printing and LAN sync as everything else — but the shop also
+  /// gets a dedicated screen to manage them and record "shop use".
+  static const String shoppingBagCategoryName = 'Shopping Bags';
+
+  /// Returns the reserved "Shopping Bags" category, creating it on first use.
+  Future<Category> ensureShoppingBagCategory() async {
+    final existing = await getCategoryByName(shoppingBagCategoryName);
+    if (existing != null) return existing;
+    final category = Category(
+      name: shoppingBagCategoryName,
+      description: 'Carrier / shopping bags sold to customers or used in the shop',
+    );
+    await insertCategory(category);
+    return category;
+  }
+
+  /// Every product that belongs to the reserved shopping-bag category.
+  Future<List<Product>> getShoppingBagProducts() async {
+    final category = await getCategoryByName(shoppingBagCategoryName);
+    if (category == null) return const [];
+    final db = await database;
+    final maps = await db.query(
+      'products',
+      where: 'categoryId = ?',
+      whereArgs: [category.id],
+    );
+    return maps.map(Product.fromMap).toList();
+  }
+
   // ============== PRODUCTS ==============
   Future<void> insertProduct(Product product) async {
     try {
@@ -1067,6 +1274,7 @@ class DatabaseService {
     required List<Map<String, dynamic>> products,
     List<Map<String, dynamic>> categories = const [],
     List<Map<String, dynamic>> customers = const [],
+    List<Map<String, dynamic>> suppliers = const [],
   }) async {
     final db = await database;
     await db.transaction((txn) async {
@@ -1113,8 +1321,85 @@ class DatabaseService {
           // Keep the local customer on any conflict.
         }
       }
+
+      for (final sup in suppliers) {
+        final map = Map<String, dynamic>.from(sup);
+        try {
+          await txn.insert(
+            'suppliers',
+            Supplier.fromMap(map).toMap(),
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        } catch (_) {
+          // Keep the local supplier on any conflict.
+        }
+      }
     });
     BackupService.notifyTransaction('catalog sync');
+  }
+
+  /// Applies the label-scale layout pushed by the admin PC in the catalog.
+  /// Only the six scale fields are touched; every other local setting (printer,
+  /// backup paths, network mode...) stays as this PC has it. Missing keys are
+  /// ignored so an older server can never blank a locally set value.
+  Future<void> applyScaleSettingsFromServer(Map<String, dynamic> scale) async {
+    final current = await getShopSettings();
+    final updated = current.copyWith(
+      scaleBarcodeEnabled: scale['enabled'] as bool?,
+      scaleBarcodePrefix: scale['prefix'] as String?,
+      scaleBarcodeLength: (scale['length'] as num?)?.toInt(),
+      scaleBarcodeItemLength: (scale['itemLength'] as num?)?.toInt(),
+      scaleBarcodePriceMode: scale['priceMode'] as bool?,
+      scaleBarcodeCheckDigit: scale['checkDigit'] as bool?,
+    );
+    await updateShopSettings(updated);
+  }
+
+  /// Cheap fingerprint of the catalog this PC owns.
+  ///
+  /// Client terminals save this value and only re-download the catalog when it
+  /// changes, so a steady LAN link uses almost no WiFi data. Any rename, price
+  /// change, stock move or new image on the server bumps the revision.
+  Future<String> catalogRevision() async {
+    final db = await database;
+    Future<(int, String)> stamp(String table, String timeCol) async {
+      final rows = await db.rawQuery(
+        'SELECT COUNT(*) AS c, MAX($timeCol) AS m FROM $table',
+      );
+      final row = rows.isEmpty ? const <String, Object?>{} : rows.first;
+      return ((row['c'] as int? ?? 0), (row['m'] as String? ?? ''));
+    }
+
+    final p = await stamp('products', 'updatedAt');
+    final c = await stamp('categories', 'updatedAt');
+    final u = await stamp('customers', 'lastPurchaseDate');
+    final s = await stamp('suppliers', 'updatedAt');
+    // Fold in the label-scale layout so changing it on the admin PC bumps the
+    // revision and every terminal re-pulls the catalog (and the new layout).
+    String scale = 'sc-';
+    try {
+      final rows = await db.query(
+        'shop_settings',
+        columns: [
+          'scaleBarcodeEnabled',
+          'scaleBarcodePrefix',
+          'scaleBarcodeLength',
+          'scaleBarcodeItemLength',
+          'scaleBarcodePriceMode',
+          'scaleBarcodeCheckDigit',
+        ],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        final r = rows.first;
+        scale = 'sc${r['scaleBarcodeEnabled']}|${r['scaleBarcodePrefix']}|'
+            '${r['scaleBarcodeLength']}|${r['scaleBarcodeItemLength']}|'
+            '${r['scaleBarcodePriceMode']}|${r['scaleBarcodeCheckDigit']}';
+      }
+    } catch (_) {
+      // Column missing on an un-migrated DB: ignore, catalogue still syncs.
+    }
+    return 'p$p|c$c|u$u|s$s|$scale';
   }
 
   /// Records a sale pushed to this PC by another terminal (the cashier).
@@ -1137,18 +1422,21 @@ class DatabaseService {
     final cartItems = <CartItem>[];
     for (final item in incoming.items) {
       final product = await getProductById(item.productId);
-      if (product == null || product.quantity <= 0) {
+      // An unknown product only means there is nothing to deduct — never a
+      // reason to drop the sale. [completeSale] clamps stock at zero, and the
+      // financial row is what the profit & loss report is built from, so
+      // rejecting here would silently delete this shop's revenue.
+      if (product == null) {
         continue;
       }
       cartItems.add(CartItem(
-        id: product.id,
+        id: item.loose ? '${product.id}#loose' : product.id,
         product: product,
         quantity: item.quantity,
-        unitPrice: product.sellingPrice,
+        unitPrice: item.price,
+        loose: item.loose,
+        piecesPerBox: item.piecesPerBox,
       ));
-    }
-    if (cartItems.isEmpty) {
-      throw Exception('Remote sale has no items with available stock');
     }
 
     final sequence = await getNextInvoiceSequence();
@@ -1194,6 +1482,28 @@ class DatabaseService {
       return Product.fromMap(maps.first);
     }
     return null;
+  }
+
+  /// Look up a product by barcode, tolerating leading zeros on either side.
+  ///
+  /// A label scale may zero-pad (or not) its item/PLU code, and the shopkeeper
+  /// may type a different number of leading zeros into the product barcode, so
+  /// a label item `00010` and a product barcode `0000010` are the same code for
+  /// a scale scan. Exact match is always tried first, so normal EAN-13 barcodes
+  /// (including ones that legitimately begin with `0`) are unaffected.
+  Future<Product?> getProductByBarcodeLoose(String code) async {
+    final trimmed = code.trim();
+    if (trimmed.isEmpty) return null;
+    final exact = await getProductByBarcode(trimmed);
+    if (exact != null) return exact;
+    final stripped = trimmed.replaceFirst(RegExp(r'^0+'), '');
+    if (stripped.isEmpty) return null;
+    final db = await database;
+    final maps = await db.rawQuery(
+      "SELECT * FROM products WHERE LTRIM(barcode, '0') = ? LIMIT 1",
+      [stripped],
+    );
+    return maps.isNotEmpty ? Product.fromMap(maps.first) : null;
   }
 
   Future<void> updateProduct(Product product) async {
@@ -1367,6 +1677,87 @@ class DatabaseService {
     return maps.map(ReloadCard.fromMap).toList();
   }
 
+  /// Reload (top-up) performance for a date range: the value sold to customers,
+  /// the margin the shop earned on it and how many reload sales there were.
+  ///
+  /// Only the **margin** counts towards profit — the wholesale cost of the card
+  /// is paid to the ISP and is already netted out here, so it is never also
+  /// counted as an expense. Sold rows are dated by `usedAt`, falling back to
+  /// `createdAt` for any legacy row that has no timestamp.
+  Future<Map<String, dynamic>> getReloadSummary(
+    DateTime start,
+    DateTime end,
+  ) async {
+    final db = await database;
+    const stamp =
+        "CASE WHEN usedAt IS NULL OR usedAt = '' THEN createdAt ELSE usedAt END";
+    final rows = await db.query(
+      'reload_cards',
+      where: "status = 'sold' AND $stamp >= ? AND $stamp <= ?",
+      whereArgs: [start.toIso8601String(), end.toIso8601String()],
+    );
+    var soldValue = 0.0;
+    var profit = 0.0;
+    for (final row in rows) {
+      final value = (row['value'] as num?)?.toDouble() ?? 0;
+      final cost = (row['cost'] as num?)?.toDouble() ?? 0;
+      soldValue += value;
+      profit += value - cost;
+    }
+    return {
+      'soldValue': soldValue,
+      'profit': profit,
+      'count': rows.length,
+    };
+  }
+
+  /// Money paid out on processed refunds and money still owed on pending or
+  /// approved refunds within a window, plus their counts.
+  ///
+  /// A processed refund is dated by when it was paid out (`processedDate`,
+  /// falling back to `createdAt` for legacy rows); a pending/approved one is
+  /// dated by when it was raised.
+  Future<Map<String, dynamic>> _refundSummary(
+    String fromIso,
+    String toIso,
+  ) async {
+    final db = await database;
+    final rows = await db.query('refund_returns');
+    var loss = 0.0;
+    var pending = 0.0;
+    var processed = 0;
+    var pendingCount = 0;
+    bool inRange(String? stamp) =>
+        stamp != null &&
+        stamp.isNotEmpty &&
+        stamp.compareTo(fromIso) >= 0 &&
+        stamp.compareTo(toIso) <= 0;
+    for (final row in rows) {
+      final amount = (row['totalRefundAmount'] as num?)?.toDouble() ?? 0;
+      final status = (row['status'] as String? ?? '').toLowerCase();
+      if (status == 'processed') {
+        final processedOn = (row['processedDate'] as String?)?.isNotEmpty == true
+            ? row['processedDate'] as String?
+            : row['createdAt'] as String?;
+        if (inRange(processedOn)) {
+          loss += amount;
+          processed++;
+        }
+      } else if (status == 'pending' || status == 'approved') {
+        if (inRange(row['createdAt'] as String?)) {
+          pending += amount;
+          pendingCount++;
+        }
+      }
+    }
+    return {
+      'loss': loss,
+      'pending': pending,
+      'count': processed,
+      'pendingCount': pendingCount,
+    };
+  }
+
   Future<void> insertReloadCard(ReloadCard card) async {
     final db = await database;
     await db.insert(
@@ -1483,14 +1874,20 @@ class DatabaseService {
 
   // ============== FIFO / BATCH PRICING ==============
   /// Batches for a product that still have stock, oldest received first.
+  ///
+  /// Expired batches are excluded (a batch whose expiry has passed must never
+  /// be sold), so FIFO picking, the effective price and [completeSale] all
+  /// only ever touch sellable stock. Batches without an expiry date remain
+  /// sellable — not everything carries one.
   Future<List<ProductBatch>> _fifoBatches(
     DatabaseExecutor db,
     String productId,
   ) async {
     final maps = await db.query(
       'product_batches',
-      where: 'productId = ? AND quantity > 0',
-      whereArgs: [productId],
+      where:
+          'productId = ? AND quantity > 0 AND (expiryDate IS NULL OR expiryDate > ?)',
+      whereArgs: [productId, DateTime.now().toIso8601String()],
     );
     final batches = maps.map(ProductBatch.fromMap).toList();
     batches.sort((a, b) {
@@ -1587,7 +1984,11 @@ class DatabaseService {
 
       final now = DateTime.now().toIso8601String();
       for (final item in items) {
-        var remaining = item.quantity;
+        // Stock is tracked in the product's own unit (boxes). A loose line
+        // takes only a fraction of a box, so deduct its stock quantity rather
+        // than its piece count.
+        final stockTake = item.stockQuantity;
+        var remaining = stockTake;
         final batches = await _fifoBatches(txn, item.product.id);
         for (final batch in batches) {
           if (remaining <= 0) break;
@@ -1608,8 +2009,14 @@ class DatabaseService {
         );
         if (productMaps.isNotEmpty) {
           final product = Product.fromMap(productMaps.first);
-          final newQty =
-              (product.quantity - item.quantity).clamp(0.0, double.infinity);
+          var newQty =
+              (product.quantity - stockTake).clamp(0.0, double.infinity);
+          // Snap break-bulk stock back onto an exact piece boundary so selling
+          // one stick at a time can never accumulate floating-point drift.
+          if (product.isBreakBulk) {
+            newQty = (newQty * product.piecesPerBox).round() /
+                product.piecesPerBox;
+          }
           await txn.update(
             'products',
             {'quantity': newQty, 'updatedAt': now},
@@ -1621,7 +2028,7 @@ class DatabaseService {
         await txn.insert('stock_history', {
           'productId': item.product.id,
           'productName': item.product.name,
-          'quantityChanged': -item.quantity,
+          'quantityChanged': -stockTake,
           'reason': 'Sale ${sale.invoiceLabel}',
           'createdAt': now,
         });
@@ -1711,6 +2118,7 @@ class DatabaseService {
               'sellingPrice': item.sellingPrice > 0
                   ? item.sellingPrice
                   : batch.sellingPrice,
+              'updatedAt': now,
             },
             where: 'id = ?',
             whereArgs: [batch.id],
@@ -1729,6 +2137,7 @@ class DatabaseService {
             'supplierId': grn.supplierId,
             'notes': 'GRN ${grn.grnNumber}',
             'createdAt': now,
+            'updatedAt': now,
           });
         }
 
@@ -1888,9 +2297,13 @@ class DatabaseService {
   // ============== CUSTOMERS ==============
   Future<void> insertCustomer(Customer customer) async {
     final db = await database;
+    final map = customer.toMap();
+    // Always stamp the mirror clock so the other PC picks the row up even when
+    // the caller built the object from an older copy.
+    map['updatedAt'] = DateTime.now().toIso8601String();
     await db.insert(
       'customers',
-      customer.toMap(),
+      map,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
     BackupService.notifyTransaction('customer');
@@ -1923,9 +2336,11 @@ class DatabaseService {
 
   Future<void> updateCustomer(Customer customer) async {
     final db = await database;
+    final map = customer.toMap();
+    map['updatedAt'] = DateTime.now().toIso8601String();
     await db.update(
       'customers',
-      customer.toMap(),
+      map,
       where: 'id = ?',
       whereArgs: [customer.id],
     );
@@ -1979,9 +2394,13 @@ class DatabaseService {
   // ============== EXPENSES ==============
   Future<void> insertExpense(Expense expense) async {
     final db = await database;
+    final map = expense.toMap();
+    if ((map['createdAt'] as String?)?.isEmpty ?? true) {
+      map['createdAt'] = DateTime.now().toIso8601String();
+    }
     await db.insert(
       'expenses',
-      expense.toMap(),
+      map,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
     BackupService.notifyTransaction('expense');
@@ -2025,6 +2444,9 @@ class DatabaseService {
     final sales = await getSalesByDateRange(start, end);
     final expenses = await getExpensesByDateRange(start, end);
     final wastageReport = await getWastageReport(start, end);
+    final reload = await getReloadSummary(start, end);
+    final refunds =
+        await _refundSummary(start.toIso8601String(), end.toIso8601String());
 
     final products = await getAllProducts();
     final productById = <String, Product>{
@@ -2046,8 +2468,22 @@ class DatabaseService {
     final totalExpenses =
         expenses.fold<double>(0, (sum, e) => sum + e.amount);
     final totalWastage = wastageReport['totalLoss'] as double;
+    final totalRefunds = refunds['loss'] as double;
+    final reloadProfit = reload['profit'] as double;
+    final totalSupplierReturns = await getSupplierReturnsTotal(
+      start.toIso8601String(),
+      end.toIso8601String(),
+    );
     final grossProfit = totalRevenue - totalCogs;
-    final netProfit = grossProfit - totalExpenses - totalWastage;
+    // One honest bottom line: bills, minus the cost of what sold, minus
+    // expenses, wastage and refunds paid out, plus the reload margin earned,
+    // plus the value of any goods returned to suppliers.
+    final netProfit = grossProfit -
+        totalExpenses -
+        totalWastage -
+        totalRefunds +
+        reloadProfit +
+        totalSupplierReturns;
 
     return {
       'totalRevenue': totalRevenue,
@@ -2057,8 +2493,298 @@ class DatabaseService {
       'expenses': expenses,
       'totalWastage': totalWastage,
       'wastages': wastageReport['wastages'],
+      'totalRefunds': totalRefunds,
+      'reloadProfit': reloadProfit,
+      'reloadSoldValue': reload['soldValue'],
+      'totalSupplierReturns': totalSupplierReturns,
       'netProfit': netProfit,
     };
+  }
+
+  // ============== LAN DATA MIRROR ==============
+  //
+  // Every terminal keeps its own copy of the shop's data so it can keep selling
+  // (and reporting) when the WiFi drops. This is the shared contract that keeps
+  // those copies identical:
+  //
+  //   * the server publishes changed rows — bills, expenses, wastage, reload
+  //     cards, refunds, repack runs, goods received, purchase orders and
+  //     supplier payments — and every client pulls them,
+  //   * a client pushes its own new rows back up, so the server's reports and
+  //     stock count what that till did too.
+  //
+  // Stock is the one thing a row cannot carry: a bill must move FIFO batches,
+  // not just a number. So the *server* stays the single owner of stock and a
+  // client sends "this product moved by -2" deltas instead of absolute
+  // quantities (see [applyStockDeltas]). That way a bill the server rang up in
+  // the same second is never clobbered by a stale figure from the other PC.
+
+  /// Fingerprint of every table the mirror carries.
+  ///
+  /// Terminals compare this before pulling, so an idle link costs one tiny
+  /// request — the same trick the catalog sync uses to keep WiFi usage near
+  /// zero. The row count, a money sum (* amount edits) and the newest date
+  /// together catch new, edited and deleted rows, not just new ones.
+  Future<String> financialRevision() async {
+    final db = await database;
+    final parts = <String>[];
+    for (final spec in _mirrorTables) {
+      if (spec.parentTable != null) continue; // covered by its parent's stamp
+      final sum =
+          spec.sumColumn == null ? '0' : 'COALESCE(SUM(${spec.sumColumn}), 0)';
+      final rows = await db.rawQuery(
+        'SELECT COUNT(*) c, $sum s, MAX(${spec.dateExpr}) m FROM ${spec.table}',
+      );
+      final row = rows.isEmpty ? const <String, Object?>{} : rows.first;
+      parts.add(
+        '${spec.table}=${row['c'] ?? 0}:${row['s'] ?? 0}:${row['m'] ?? ''}',
+      );
+    }
+    // The reset token leads the string so a terminal can spot "the admin wiped
+    // the reports" before it decides the data is unchanged.
+    final reset = await getSyncMeta(_reportsResetKey) ?? '';
+    return 'r$reset|${parts.join('|')}';
+  }
+
+  // ---------------- Sync bookkeeping ----------------
+
+  static const String _reportsResetKey = 'reports_reset_at';
+
+  /// Small key/value store for cross-machine bookkeeping. Created on demand so
+  /// no schema migration is needed.
+  Future<void> _ensureSyncMeta(Database db) async {
+    await db.execute(
+      'CREATE TABLE IF NOT EXISTS sync_meta ('
+      'key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    );
+  }
+
+  Future<String?> getSyncMeta(String key) async {
+    final db = await database;
+    await _ensureSyncMeta(db);
+    final rows = await db.query(
+      'sync_meta',
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first['value'] as String?;
+  }
+
+  Future<void> setSyncMeta(String key, String value) async {
+    final db = await database;
+    await _ensureSyncMeta(db);
+    await db.insert(
+      'sync_meta',
+      {'key': key, 'value': value},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// The moment the reports were last wiped, or null if never.
+  Future<String?> reportsResetAt() => getSyncMeta(_reportsResetKey);
+
+  /// Wipes the report/ledger history — bills, expenses, wastage and reload
+  /// cards — and NOTHING else.
+  ///
+  /// Deliberately leaves products, categories, customers, images, batches and
+  /// current stock quantities untouched: owners use this to clear test/opening
+  /// figures and start trading from zero without re-entering the catalogue. It
+  /// also stamps [reportsResetAt] so the other machine clears its own mirrored
+  /// copy instead of pulling the deleted rows back in.
+  Future<Map<String, int>> clearFinancialHistory() async {
+    final db = await database;
+    var sales = 0;
+    var expenses = 0;
+    var wastages = 0;
+    var reloadCards = 0;
+    await db.transaction((txn) async {
+      sales = await txn.delete('sales');
+      expenses = await txn.delete('expenses');
+      wastages = await txn.delete('wastages');
+      reloadCards = await txn.delete('reload_cards');
+    });
+    await setSyncMeta(_reportsResetKey, DateTime.now().toIso8601String());
+    BackupService.notifyTransaction('reset-reports');
+    return {
+      'sales': sales,
+      'expenses': expenses,
+      'wastages': wastages,
+      'reload_cards': reloadCards,
+    };
+  }
+
+  /// Rows each mirrored table has written at or after [since].
+  ///
+  /// Sales fall back to the last 7 days when [since] is null (a bill table can
+  /// grow for years); every other table is small, so a brand-new terminal gets
+  /// all of it and its reports and history are complete from the first sync.
+  ///
+  /// Returned as raw database maps: `sales.items` and the GRN/order `items` are
+  /// JSON *strings* in the schema and must stay that way, so the receiving
+  /// terminal can insert them verbatim without re-encoding.
+  Future<Map<String, dynamic>> mirrorRowsSince(DateTime? since) async {
+    final db = await database;
+    final out = <String, dynamic>{};
+
+    for (final spec in _mirrorTables) {
+      List<Map<String, dynamic>> maps;
+      if (spec.parentTable != null) {
+        final parent = _mirrorSpec(spec.parentTable!)!;
+        if (since == null) {
+          maps = await db.rawQuery('SELECT * FROM ${spec.table}');
+        } else {
+          maps = await db.rawQuery(
+            'SELECT * FROM ${spec.table} WHERE ${spec.parentColumn} IN '
+            '(SELECT id FROM ${spec.parentTable} WHERE (${parent.dateExpr}) >= ?)',
+            [since.toIso8601String()],
+          );
+        }
+      } else {
+        final cutoff = since ??
+            (spec.table == 'sales'
+                ? DateTime.now().subtract(const Duration(days: 7))
+                : null);
+        maps = await db.query(
+          spec.table,
+          where: cutoff == null ? null : '(${spec.dateExpr}) >= ?',
+          whereArgs: cutoff == null ? null : [cutoff.toIso8601String()],
+          orderBy: spec.dateExpr,
+        );
+      }
+      out[spec.table] =
+          maps.map((e) => Map<String, dynamic>.from(e)).toList();
+    }
+    return out;
+  }
+
+  /// Merges mirrored rows coming from the other machine.
+  ///
+  /// Insert-or-replace by primary key, and deliberately nothing else: stock is
+  /// never touched here. Quantities ride [applyStockDeltas] instead, so a bill
+  /// arriving twice — or a row that came *from* this machine in the first
+  /// place — can never double-count a movement.
+  Future<int> applyMirror(Map<String, dynamic> tables) async {
+    final db = await database;
+    var applied = 0;
+
+    await db.transaction((txn) async {
+      for (final spec in _mirrorTables) {
+        final rows = tables[spec.table];
+        if (rows is! List) continue;
+        for (final raw in rows) {
+          if (raw is! Map) continue;
+          final row = Map<String, dynamic>.from(raw);
+          if (row['id'] == null) continue;
+          try {
+            if (spec.table == 'product_batches') {
+              // A batch lot can be pushed from either PC. When it already
+              // exists here, refresh only its metadata (expiry date, prices,
+              // batch number, notes) and KEEP the local quantities: each
+              // terminal moves its own FIFO layers, so the other machine's
+              // remaining-quantity figure must never overwrite ours.
+              final existing = await txn.query(
+                'product_batches',
+                columns: ['id', 'updatedAt'],
+                where: 'id = ?',
+                whereArgs: [row['id']],
+                limit: 1,
+              );
+              if (existing.isNotEmpty) {
+                // Keep the later edit stamp: an older incoming `updatedAt`
+                // must never roll the sync clock back and hide this machine's
+                // newer expiry edit from the other PC.
+                final localStamp =
+                    existing.first['updatedAt'] as String? ?? '';
+                final incomingStamp = (row['updatedAt'] as String?) ??
+                    (row['createdAt'] as String?) ??
+                    (row['receivedDate'] as String?) ??
+                    '';
+                final mergedStamp = incomingStamp.compareTo(localStamp) > 0
+                    ? incomingStamp
+                    : localStamp;
+                await txn.update(
+                  'product_batches',
+                  {
+                    'productId': row['productId'],
+                    'batchNumber': row['batchNumber'],
+                    'price': row['price'],
+                    'sellingPrice': row['sellingPrice'],
+                    'expiryDate': row['expiryDate'],
+                    'supplierId': row['supplierId'],
+                    'notes': row['notes'] ?? '',
+                    'receivedDate': row['receivedDate'],
+                    'updatedAt': mergedStamp.isEmpty ? null : mergedStamp,
+                  },
+                  where: 'id = ?',
+                  whereArgs: [row['id']],
+                );
+                applied++;
+                continue;
+              }
+            }
+            await txn.insert(
+              spec.table,
+              row,
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+            applied++;
+          } catch (_) {
+            // One malformed row must never abort the whole mirror.
+          }
+        }
+      }
+    });
+
+    if (applied > 0) {
+      BackupService.notifyTransaction('mirror');
+    }
+    return applied;
+  }
+
+  /// Applies the stock movements another terminal made, as *deltas*.
+  ///
+  /// The client sends "product X moved by -2" rather than an absolute number,
+  /// so a bill the server rang up in the same second is never overwritten by a
+  /// stale figure from the other PC. The server stays the single writer of the
+  /// batch layers; only the product's on-hand total moves here.
+  Future<int> applyStockDeltas(List<Map<String, dynamic>> deltas) async {
+    if (deltas.isEmpty) return 0;
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    var applied = 0;
+
+    await db.transaction((txn) async {
+      for (final delta in deltas) {
+        final id = delta['id'] as String?;
+        final amount = (delta['delta'] as num?)?.toDouble() ?? 0;
+        if (id == null || id.isEmpty || amount == 0) continue;
+        final rows = await txn.query(
+          'products',
+          columns: ['quantity'],
+          where: 'id = ?',
+          whereArgs: [id],
+          limit: 1,
+        );
+        if (rows.isEmpty) continue;
+        final current = (rows.first['quantity'] as num?)?.toDouble() ?? 0;
+        var next = current + amount;
+        if (next < 0) next = 0;
+        await txn.update(
+          'products',
+          {'quantity': next, 'updatedAt': now},
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+        applied++;
+      }
+    });
+
+    if (applied > 0) {
+      BackupService.notifyTransaction('stock mirror');
+    }
+    return applied;
   }
 
   /// Whole-shop profit and loss for a date range.
@@ -2138,26 +2864,17 @@ class DatabaseService {
     }
 
     // ---- Refunds (money only leaves on a processed refund) --------------
-    final refundRows = await db.query(
-      'refund_returns',
-      where: 'createdAt >= ? AND createdAt <= ?',
-      whereArgs: [fromIso, toIso],
-    );
-    var refundLoss = 0.0;
-    var refundPending = 0.0;
-    var refundProcessedCount = 0;
-    var refundPendingCount = 0;
-    for (final row in refundRows) {
-      final amount = (row['totalRefundAmount'] as num?)?.toDouble() ?? 0;
-      final status = (row['status'] as String? ?? '').toLowerCase();
-      if (status == 'processed') {
-        refundLoss += amount;
-        refundProcessedCount++;
-      } else if (status == 'pending' || status == 'approved') {
-        refundPending += amount;
-        refundPendingCount++;
-      }
-    }
+    final refundSummary = await _refundSummary(fromIso, toIso);
+    final refundLoss = refundSummary['loss'] as double;
+    final refundPending = refundSummary['pending'] as double;
+    final refundProcessedCount = refundSummary['count'] as int;
+    final refundPendingCount = refundSummary['pendingCount'] as int;
+
+    // ---- Reload (top-up) margin earned in the window --------------------
+    final reloadSummary = await getReloadSummary(start, end);
+    final reloadProfit = reloadSummary['profit'] as double;
+    final reloadSoldValue = reloadSummary['soldValue'] as double;
+    final reloadSoldCount = reloadSummary['count'] as int;
 
     // ---- Expenses ------------------------------------------------------
     final expenseRows = await db.query(
@@ -2209,6 +2926,17 @@ class DatabaseService {
       }
     }
 
+    // ---- Supplier returns (goods sent back; value is a credit) ----------
+    final returnRows = await db.query(
+      'supplier_returns',
+      where: 'returnDate >= ? AND returnDate <= ?',
+      whereArgs: [fromIso, toIso],
+    );
+    var supplierReturnsValue = 0.0;
+    for (final row in returnRows) {
+      supplierReturnsValue += (row['total'] as num?)?.toDouble() ?? 0;
+    }
+
     // ---- Money still owed to suppliers ---------------------------------
     var supplierOutstanding = 0.0;
     try {
@@ -2232,7 +2960,11 @@ class DatabaseService {
         wastageLoss +
         refundLoss +
         expenseTotal;
-    final netProfit = revenue - totalLoss;
+    // Reload margin is additional income the shop earned, independent of the
+    // till's bills, so it is added after the running costs are taken off. A
+    // supplier return is money that came back from a supplier (the goods were
+    // already counted in an earlier GRN), so it increases the bottom line too.
+    final netProfit = revenue + reloadProfit + supplierReturnsValue - totalLoss;
 
     return {
       'revenue': revenue,
@@ -2252,6 +2984,9 @@ class DatabaseService {
       'refundCount': refundProcessedCount,
       'refundPending': refundPending,
       'refundPendingCount': refundPendingCount,
+      'reloadProfit': reloadProfit,
+      'reloadSoldValue': reloadSoldValue,
+      'reloadSoldCount': reloadSoldCount,
       'expenseTotal': expenseTotal,
       'expenseCount': expenseRows.length,
       'expenseByCategory': expenseByCategory,
@@ -2262,6 +2997,8 @@ class DatabaseService {
       'supplierPaidCash': supplierPaidCash,
       'supplierPaidCheque': supplierPaidCheque,
       'supplierOutstanding': supplierOutstanding,
+      'supplierReturnsValue': supplierReturnsValue,
+      'supplierReturnsCount': returnRows.length,
       'stockValue': stockValue,
       'stockItems': stockItems,
       'productCount': products.length,
@@ -2343,6 +3080,7 @@ class DatabaseService {
         notes: notes,
         recordedBy: recordedBy,
         wastageDate: wastageDate ?? DateTime.now(),
+        updatedAt: DateTime.now(),
       );
       await txn.insert('wastages', created!.toMap());
 
@@ -2360,6 +3098,182 @@ class DatabaseService {
       BackupService.notifyTransaction('wastage');
     }
     return ok ? created : null;
+  }
+
+  /// Edits an existing wastage record. A changed quantity moves stock by the
+  /// difference (a bigger loss deducts more units, a smaller one puts units
+  /// back), and the loss is re-valued at the same unit cost used when it was
+  /// first recorded. Returns null when the row or its product has gone.
+  Future<Wastage?> updateWastage({
+    required String id,
+    double? quantity,
+    String? reason,
+    String? notes,
+    DateTime? wastageDate,
+  }) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    Wastage? updated;
+
+    final ok = await db.transaction((txn) async {
+      final rows = await txn.query(
+        'wastages',
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      if (rows.isEmpty) return false;
+      final current = Wastage.fromMap(rows.first);
+
+      final newQty = quantity ?? current.quantity;
+      final delta = newQty - current.quantity;
+
+      final productMaps = await txn.query(
+        'products',
+        where: 'id = ?',
+        whereArgs: [current.productId],
+      );
+      if (productMaps.isEmpty) return false;
+      final product = Product.fromMap(productMaps.first);
+      var unitCost = product.buyingPrice;
+
+      if (current.batchId.isNotEmpty) {
+        final batchMaps = await txn.query(
+          'product_batches',
+          where: 'id = ?',
+          whereArgs: [current.batchId],
+        );
+        if (batchMaps.isNotEmpty) {
+          final batch = ProductBatch.fromMap(batchMaps.first);
+          unitCost = batch.price > 0 ? batch.price : unitCost;
+          if (delta != 0) {
+            final newBatchQty =
+                (batch.quantity - delta).clamp(0.0, double.infinity);
+            await txn.update(
+              'product_batches',
+              {'quantity': newBatchQty, 'updatedAt': now},
+              where: 'id = ?',
+              whereArgs: [batch.id],
+            );
+          }
+        }
+      }
+
+      if (delta != 0) {
+        final newProductQty =
+            (product.quantity - delta).clamp(0.0, double.infinity);
+        await txn.update(
+          'products',
+          {'quantity': newProductQty, 'updatedAt': now},
+          where: 'id = ?',
+          whereArgs: [product.id],
+        );
+        await txn.insert('stock_history', {
+          'productId': product.id,
+          'productName': current.productName,
+          'quantityChanged': -delta,
+          'reason': 'Wastage corrected',
+          'createdAt': now,
+        });
+      }
+
+      updated = Wastage(
+        id: current.id,
+        productId: current.productId,
+        productName: current.productName,
+        quantity: newQty,
+        reason: reason ?? current.reason,
+        lossValue: unitCost * newQty,
+        batchId: current.batchId,
+        batchNumber: current.batchNumber,
+        notes: notes ?? current.notes,
+        recordedBy: current.recordedBy,
+        wastageDate: wastageDate ?? current.wastageDate,
+        createdAt: current.createdAt,
+        updatedAt: DateTime.now(),
+      );
+      await txn.update(
+        'wastages',
+        updated!.toMap(),
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      return true;
+    });
+
+    if (ok) {
+      BackupService.notifyTransaction('wastage');
+    }
+    return ok ? updated : null;
+  }
+
+  /// Removes a wastage record and puts its units back on the shelf (product and
+  /// owning batch), so stock counts stay consistent with the correction.
+  Future<bool> deleteWastage(String id) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    final ok = await db.transaction((txn) async {
+      final rows = await txn.query(
+        'wastages',
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      if (rows.isEmpty) return false;
+      final current = Wastage.fromMap(rows.first);
+
+      if (current.batchId.isNotEmpty) {
+        final batchMaps = await txn.query(
+          'product_batches',
+          where: 'id = ?',
+          whereArgs: [current.batchId],
+        );
+        if (batchMaps.isNotEmpty) {
+          final batch = ProductBatch.fromMap(batchMaps.first);
+          await txn.update(
+            'product_batches',
+            {
+              'quantity': batch.quantity + current.quantity,
+              'updatedAt': now,
+            },
+            where: 'id = ?',
+            whereArgs: [batch.id],
+          );
+        }
+      }
+
+      final productMaps = await txn.query(
+        'products',
+        where: 'id = ?',
+        whereArgs: [current.productId],
+      );
+      if (productMaps.isNotEmpty) {
+        final product = Product.fromMap(productMaps.first);
+        await txn.update(
+          'products',
+          {'quantity': product.quantity + current.quantity, 'updatedAt': now},
+          where: 'id = ?',
+          whereArgs: [product.id],
+        );
+        await txn.insert('stock_history', {
+          'productId': product.id,
+          'productName': current.productName,
+          'quantityChanged': current.quantity,
+          'reason': 'Wastage record removed',
+          'createdAt': now,
+        });
+      }
+
+      await txn.delete(
+        'wastages',
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      return true;
+    });
+
+    if (ok) {
+      BackupService.notifyTransaction('wastage');
+    }
+    return ok;
   }
 
   Future<List<Wastage>> getAllWastages() async {
@@ -2417,6 +3331,7 @@ class DatabaseService {
     await db.delete('purchase_orders');
     await db.delete('expenses');
     await db.delete('wastages');
+    await db.delete('supplier_returns');
   }
 
   Future<void> closeDatabase() async {
@@ -2460,9 +3375,12 @@ class DatabaseService {
 
   Future<void> updateSupplier(Supplier supplier) async {
     final db = await database;
+    // Bump the mirror clock on every edit (same as products/customers), so a
+    // corrected phone number or payment term actually travels to the other PC
+    // instead of quietly staying behind because updatedAt never moved.
     await db.update(
       'suppliers',
-      supplier.toMap(),
+      supplier.copyWith(updatedAt: DateTime.now()).toMap(),
       where: 'id = ?',
       whereArgs: [supplier.id],
     );
@@ -2520,9 +3438,16 @@ class DatabaseService {
       'SELECT COALESCE(SUM(amount), 0) AS t FROM supplier_payments WHERE supplierId = ?',
       [supplierId],
     );
+    final returnRows = await db.rawQuery(
+      'SELECT COALESCE(SUM(total), 0) AS t FROM supplier_returns WHERE supplierId = ?',
+      [supplierId],
+    );
     final received = (grnRows.first['t'] as num).toDouble();
     final paid = (payRows.first['t'] as num).toDouble();
-    return received - paid;
+    final returned = (returnRows.first['t'] as num).toDouble();
+    // Goods the shop returned are credited: outstanding is what was received
+    // minus what was paid minus what came back to the shelves.
+    return received - paid - returned;
   }
 
   Future<double> getSupplierTotalReceived(String supplierId) async {
@@ -2543,12 +3468,149 @@ class DatabaseService {
     return (rows.first['t'] as num).toDouble();
   }
 
+  Future<double> getSupplierTotalReturned(String supplierId) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT COALESCE(SUM(total), 0) AS t FROM supplier_returns WHERE supplierId = ?',
+      [supplierId],
+    );
+    return (rows.first['t'] as num).toDouble();
+  }
+
+  /// Returns the next daily supplier-return number, e.g. SRN-20261011-0001.
+  Future<String> getNextSupplierReturnNumber() async {
+    final db = await database;
+    final now = DateTime.now();
+    final startOfDay = DateTime(now.year, now.month, now.day).toIso8601String();
+    final rows = await db.rawQuery(
+      'SELECT COUNT(*) AS c FROM supplier_returns WHERE returnDate >= ?',
+      [startOfDay],
+    );
+    final count = rows.isNotEmpty ? (rows.first['c'] as int) : 0;
+    String two(int n) => n.toString().padLeft(2, '0');
+    final seq = (count + 1).toString().padLeft(4, '0');
+    return 'SRN-${now.year}${two(now.month)}${two(now.day)}-$seq';
+  }
+
+  /// Records goods returned to a supplier — the mirror image of a GRN.
+  ///
+  /// For every item the product quantity is reduced and the stock is taken
+  /// back out of the FIFO batches (or the single batch the user picked), the
+  /// returned value is stored against the supplier and a stock-history line is
+  /// written — all atomically. The row then travels to the other PC through
+  /// the LAN mirror and the product movement rides the normal stock deltas.
+  /// Returns false when no item could be applied (product no longer exists).
+  Future<bool> recordSupplierReturn(SupplierReturn record) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    var inserted = false;
+
+    final ok = await db.transaction((txn) async {
+      for (final item in record.items) {
+        final productMaps = await txn.query(
+          'products',
+          where: 'id = ?',
+          whereArgs: [item.productId],
+        );
+        if (productMaps.isEmpty) continue;
+        final product = Product.fromMap(productMaps.first);
+
+        // Take the stock back out of the batches. A specific batch wins when
+        // the user picked one; otherwise FIFO, just like a sale.
+        var remaining = item.quantity;
+        final batches = await _fifoBatches(txn, product.id);
+        final pickedBatch = item.batchId.isNotEmpty ? item.batchId : null;
+        for (final batch in batches) {
+          if (remaining <= 0) break;
+          if (pickedBatch != null && batch.id != pickedBatch) continue;
+          final take = batch.quantity < remaining ? batch.quantity : remaining;
+          await txn.update(
+            'product_batches',
+            {'quantity': batch.quantity - take},
+            where: 'id = ?',
+            whereArgs: [batch.id],
+          );
+          remaining -= take;
+        }
+
+        var newQty =
+            (product.quantity - item.quantity).clamp(0.0, double.infinity);
+        // Snap break-bulk stock back onto an exact piece boundary (returns are
+        // stored in boxes, but never leave floating-point drift behind).
+        if (product.isBreakBulk) {
+          newQty = (newQty * product.piecesPerBox).round() /
+              product.piecesPerBox;
+        }
+        await txn.update(
+          'products',
+          {'quantity': newQty, 'updatedAt': now},
+          where: 'id = ?',
+          whereArgs: [product.id],
+        );
+
+        await txn.insert('stock_history', {
+          'productId': item.productId,
+          'productName': item.productName,
+          'quantityChanged': -item.quantity,
+          'reason': 'Returned to supplier: ${record.reason}',
+          'createdAt': now,
+        });
+        inserted = true;
+      }
+
+      if (inserted) {
+        await txn.insert('supplier_returns', record.toMap());
+      }
+      return inserted;
+    });
+
+    if (ok) {
+      BackupService.notifyTransaction('supplier return');
+    }
+    return ok;
+  }
+
+  Future<List<SupplierReturn>> getAllSupplierReturns() async {
+    final db = await database;
+    final maps = await db.query(
+      'supplier_returns',
+      orderBy: 'returnDate DESC, createdAt DESC',
+    );
+    return maps.map(SupplierReturn.fromMap).toList();
+  }
+
+  Future<List<SupplierReturn>> getSupplierReturnsBySupplier(
+    String supplierId,
+  ) async {
+    final db = await database;
+    final maps = await db.query(
+      'supplier_returns',
+      where: 'supplierId = ?',
+      whereArgs: [supplierId],
+      orderBy: 'returnDate DESC, createdAt DESC',
+    );
+    return maps.map(SupplierReturn.fromMap).toList();
+  }
+
+  /// Total value (in shop currency) of supplier returns dated inside a window.
+  Future<double> getSupplierReturnsTotal(String fromIso, String toIso) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT COALESCE(SUM(total), 0) AS t FROM supplier_returns '
+      'WHERE returnDate >= ? AND returnDate <= ?',
+      [fromIso, toIso],
+    );
+    return (rows.first['t'] as num).toDouble();
+  }
+
   // ============== PRODUCT BATCHES ==============
   Future<void> insertProductBatch(ProductBatch batch) async {
     final db = await database;
+    final now = DateTime.now().toIso8601String();
+    final map = batch.toMap()..['updatedAt'] = now;
     await db.insert(
       'product_batches',
-      batch.toMap(),
+      map,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
     BackupService.notifyTransaction('batch');
@@ -2578,11 +3640,68 @@ class DatabaseService {
     return maps.map(ProductBatch.fromMap).toList();
   }
 
+  /// Every batch that carries an expiry date, joined with its product name and
+  /// ordered soonest-expiry first. Powers the Expiry screen, which is the one
+  /// place that shows the whole shop's expiry picture at once (a product
+  /// received on several dates simply appears once per batch).
+  Future<List<(ProductBatch batch, String productName)>>
+      getExpiryOverview() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT pb.*, p.name AS productName
+      FROM product_batches pb
+      INNER JOIN products p ON p.id = pb.productId
+      WHERE pb.expiryDate IS NOT NULL
+      ORDER BY pb.expiryDate ASC
+    ''');
+    final result = <(ProductBatch, String)>[];
+    for (final row in rows) {
+      result.add((
+        ProductBatch.fromMap(row),
+        (row['productName'] as String?) ?? '',
+      ));
+    }
+    return result;
+  }
+
+  /// `productId -> expiry signals across its stocked batches`, used by the POS
+  /// grid so a tile can warn about the item's closest lot instead of the
+  /// product-level expiry column, which the Inventory form never sets.
+  ///
+  /// * `$1` — the soonest expiry still in the future (drives the
+  ///   "Exp: X days" badge);
+  /// * `$2` — the newest expiry of any stocked lot (if this is already in
+  ///   the past, every remaining lot is expired, so the whole item is
+  ///   red-flagged as unsellable).
+  Future<Map<String, (DateTime?, DateTime?)>> getBatchExpirySignals() async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    final rows = await db.rawQuery('''
+      SELECT productId,
+             MIN(CASE WHEN expiryDate > ? THEN expiryDate END) AS next,
+             MAX(expiryDate) AS latest
+      FROM product_batches
+      WHERE expiryDate IS NOT NULL AND quantity > 0
+      GROUP BY productId
+    ''', [now]);
+    return {
+      for (final row in rows)
+        row['productId'] as String: (
+          row['next'] == null ? null : DateTime.tryParse(row['next'] as String),
+          row['latest'] == null
+              ? null
+              : DateTime.tryParse(row['latest'] as String),
+        ),
+    };
+  }
+
   Future<void> updateProductBatch(ProductBatch batch) async {
     final db = await database;
+    final now = DateTime.now().toIso8601String();
+    final map = batch.toMap()..['updatedAt'] = now;
     await db.update(
       'product_batches',
-      batch.toMap(),
+      map,
       where: 'id = ?',
       whereArgs: [batch.id],
     );
@@ -2845,6 +3964,7 @@ class DatabaseService {
             {
               'quantity': batch.quantity + item.quantity,
               'initialQuantity': batch.initialQuantity + item.quantity,
+              'updatedAt': now,
             },
             where: 'id = ?',
             whereArgs: [batch.id],
@@ -2863,6 +3983,7 @@ class DatabaseService {
             'supplierId': order.supplierId,
             'notes': 'Received via ${order.orderNumber}',
             'createdAt': now,
+            'updatedAt': now,
           });
         }
       }
@@ -2896,4 +4017,110 @@ class DatabaseService {
     }
     return PurchaseOrder.fromMap(data);
   }
+}
+
+/// One table carried by the LAN data mirror.
+///
+/// [dateExpr] drives both the change fingerprint and the incremental pull — it
+/// may be a plain column or a `COALESCE(...)` when a row's "last touched"
+/// moment is not its creation date (a refund is finished on [processedDate]).
+/// [sumColumn] lets an *edit* to an existing row (a corrected expense, a refund
+/// that just got processed) move the fingerprint even when the row's own date
+/// did not change. [parentTable]/[parentColumn] mark a child table with no date
+/// of its own that therefore travels with its parent.
+class _MirrorTable {
+  const _MirrorTable(
+    this.table,
+    this.dateExpr, {
+    this.sumColumn,
+    this.parentTable,
+    this.parentColumn,
+  });
+
+  final String table;
+  final String dateExpr;
+  final String? sumColumn;
+  final String? parentTable;
+  final String? parentColumn;
+}
+
+/// The tables the mirror ships, in insert order (parents before children).
+const List<_MirrorTable> _mirrorTables = [
+  _MirrorTable('sales', 'saleDate', sumColumn: 'totalAmount'),
+  // Ledger rows carry a *business* date the user can back-date (a wastage
+  // dated last week), so the sync clock is the later of that business date and
+  // the row's own createdAt. Otherwise a row dated at midnight — what the date
+  // picker returns for "today" — sorts before the push watermark and would
+  // never travel to the other PC.
+  _MirrorTable('expenses', 'MAX(expenseDate, createdAt)', sumColumn: 'amount'),
+  _MirrorTable('wastages', 'MAX(COALESCE(updatedAt, \'\'), '
+          'COALESCE(wastageDate, \'\'), COALESCE(createdAt, \'\'))',
+      sumColumn: 'lossValue'),
+  _MirrorTable(
+    'reload_cards',
+    "COALESCE(NULLIF(usedAt, ''), createdAt)",
+    sumColumn: 'value',
+  ),
+  _MirrorTable(
+    'refund_returns',
+    'MAX(COALESCE(processedDate, createdAt), createdAt)',
+    sumColumn: 'totalRefundAmount',
+  ),
+  _MirrorTable('productions', 'producedAt'),
+  _MirrorTable(
+    'production_components',
+    '',
+    parentTable: 'productions',
+    parentColumn: 'productionId',
+  ),
+  _MirrorTable('recipes', 'updatedAt'),
+  _MirrorTable(
+    'recipe_items',
+    '',
+    parentTable: 'recipes',
+    parentColumn: 'recipeId',
+  ),
+  _MirrorTable('goods_received_notes', 'MAX(receivedDate, createdAt)',
+      sumColumn: 'total'),
+  _MirrorTable(
+    'purchase_orders',
+    'MAX(COALESCE(receivedDate, orderDate), createdAt)',
+    sumColumn: 'total',
+  ),
+  _MirrorTable('supplier_payments', 'MAX(paymentDate, createdAt)',
+      sumColumn: 'amount'),
+  // Goods returned to a supplier ride the mirror so the other PC learns about
+  // the credit and its value in one heartbeat — exactly like a payment or GRN.
+  // The stock that went back out of the shelves travels separately as a delta
+  // (see applyStockDeltas), like every other stock movement.
+  _MirrorTable(
+    'supplier_returns',
+    'MAX(COALESCE(returnDate, createdAt), createdAt)',
+    sumColumn: 'total',
+  ),
+  // Customers and suppliers ride the same mirror so a new contact typed on the
+  // cashier PC reaches the admin PC (and back) within one heartbeat, instead of
+  // only travelling server -> client through the catalog.
+  _MirrorTable('customers', 'MAX(updatedAt, createdAt)'),
+  _MirrorTable('suppliers', 'MAX(updatedAt, createdAt)'),
+  // Batch lots travel both ways so an expiry date entered on either PC (GRN
+  // on the counter, receiving on the office machine) reaches the other PC and
+  // the Expiry screen is complete everywhere. The clock is the latest of the
+  // row's creation, received date and last edit (`updatedAt` is bumped by any
+  // in-place change, so a corrected expiry date travels too). Stock quantities
+  // are NOT taken from here — see the merge in [applyMirror], which never
+  // clobbers a local quantity.
+  _MirrorTable(
+    'product_batches',
+    'COALESCE(updatedAt, receivedDate, createdAt)',
+  ),
+];
+
+/// Look up a mirror descriptor by table name (used to reach a child table's
+/// parent clock).
+_MirrorTable? _mirrorSpec(String table) {
+  for (final spec in _mirrorTables) {
+    if (spec.table == table) return spec;
+  }
+  return null;
 }

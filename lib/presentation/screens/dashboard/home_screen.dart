@@ -1,22 +1,27 @@
 import 'dart:async';
 
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
-import '../../../data/models/sale.dart';
 import '../../../data/models/user.dart';
 import '../../../data/services/customer_display_service.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/category_provider.dart';
 import '../../providers/customer_provider.dart';
+import '../../providers/expense_provider.dart';
+import '../../providers/grn_provider.dart';
 import '../../providers/network_provider.dart';
 import '../../providers/product_provider.dart';
+import '../../providers/purchase_order_provider.dart';
 import '../../providers/refund_return_provider.dart';
+import '../../providers/reload_card_provider.dart';
+import '../../providers/repack_provider.dart';
 import '../../providers/reports_provider.dart';
 import '../../providers/sales_provider.dart';
 import '../../providers/settings_provider.dart';
+import '../../providers/supplier_provider.dart';
+import '../../providers/wastage_provider.dart';
 import '../../shell/app_sidebar.dart';
 import '../../shell/app_top_bar.dart';
 import '../../shell/command_palette.dart';
@@ -27,9 +32,11 @@ import '../admin/customer_management_screen.dart';
 import '../admin/repack_screen.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../inventory/batch_management_screen.dart';
+import '../inventory/expiry_screen.dart';
 import '../inventory/grn_screen.dart';
 import '../inventory/inventory_screen.dart';
 import '../inventory/purchase_order_screen.dart';
+import '../inventory/shopping_bag_screen.dart';
 import '../inventory/wastage_management_screen.dart';
 import '../pos/pos_screen.dart';
 import '../refunds/refund_return_screen.dart';
@@ -50,63 +57,22 @@ class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   int _selectedIndex = 0;
   bool _sidebarCollapsed = false;
+  bool _sidebarTouched = false;
   late AnimationController _pageTransitionController;
   late Animation<double> _fadeAnimation;
   late Animation<Offset> _slideAnimation;
   late Future<void> _initFuture;
 
-  // Admin screens order
-  final List<String> _adminNavLabels = [
-    'Dashboard',
-    'POS',
-    'Inventory',
-    'GRN',
-    'Batches',
-    'Purchase Orders',
-    'Suppliers',
-    'Refunds',
-    'Customers',
-    'Expenses',
-    'Wastage',
-    'Production',
-    'Reload',
-    'Reports',
-    'Settings',
-  ];
-
-  final List<IconData> _adminNavIcons = [
-    Icons.dashboard,
-    Icons.point_of_sale,
-    Icons.inventory_2,
-    Icons.assignment_turned_in,
-    Icons.view_agenda,
-    Icons.local_shipping,
-    Icons.business,
-    Icons.assignment_return,
-    Icons.people,
-    Icons.receipt_long,
-    Icons.delete_sweep,
-    Icons.factory,
-    Icons.sim_card,
-    Icons.assessment,
-    Icons.settings,
-  ];
+  // Admin screens order.
+  // These delegate to [AppSidebar], the single source of truth for the shell's
+  // screens, so the labels, their icons and the sidebar's index-based groups
+  // can never drift apart (a drift that once hid Settings from the sidebar).
+  List<String> get _adminNavLabels => AppSidebar.adminLabels;
+  List<IconData> get _adminNavIcons => AppSidebar.adminIcons;
 
   // Cashier screens
-  final List<String> _cashierNavLabels = [
-    'Dashboard',
-    'POS',
-    'GRN',
-    'Refunds',
-    'Profile',
-  ];
-  final List<IconData> _cashierNavIcons = [
-    Icons.dashboard,
-    Icons.point_of_sale,
-    Icons.assignment_turned_in,
-    Icons.assignment_return,
-    Icons.person,
-  ];
+  List<String> get _cashierNavLabels => AppSidebar.cashierLabels;
+  List<IconData> get _cashierNavIcons => AppSidebar.cashierIcons;
 
   @override
   void initState() {
@@ -163,6 +129,31 @@ class _HomeScreenState extends State<HomeScreen>
       unawaited(productProvider.loadProducts());
       unawaited(customerProvider.loadCustomers());
       unawaited(context.read<CategoryProvider>().loadCategories());
+      unawaited(context.read<SupplierProvider>().loadSuppliers());
+      // The admin PC may have pushed a new label-scale layout with the catalog.
+      unawaited(context.read<SettingsProvider>().loadSettings());
+    };
+
+    // A sale pushed in from another terminal: refresh stock + today's figures
+    // so this machine always shows the real, current numbers.
+    networkProvider.onRemoteSaleReceived = () {
+      if (!mounted) {
+        return;
+      }
+      unawaited(productProvider.loadProducts());
+      unawaited(reportProvider.generateDailyReport(DateTime.now()));
+      unawaited(context.read<RefundReturnProvider>().loadRefunds());
+    };
+
+    // Mirrored data landed from the other PC: the whole shop's day — bills,
+    // expenses, wastage, reload cards, refunds, repacks, goods received and
+    // supplier payments — must repaint without the user touching anything.
+    networkProvider.onFinancialsSynced = () {
+      if (!mounted) {
+        return;
+      }
+      unawaited(reportProvider.generateDailyReport(DateTime.now()));
+      _reloadMirroredData();
     };
 
     await productProvider.loadProducts();
@@ -170,6 +161,24 @@ class _HomeScreenState extends State<HomeScreen>
     await customerProvider.loadCustomers();
     await reportProvider.generateDailyReport(DateTime.now());
     await context.read<RefundReturnProvider>().loadRefunds();
+  }
+
+  /// Reloads every screen-level list fed by the LAN mirror. These are cheap
+  /// local queries, called whenever the other PC's records land.
+  void _reloadMirroredData() {
+    if (!mounted) {
+      return;
+    }
+    unawaited(context.read<WastageProvider>().loadWastages());
+    unawaited(context.read<ReloadCardProvider>().loadCards());
+    unawaited(context.read<RepackProvider>().loadAll());
+    unawaited(context.read<RefundReturnProvider>().loadRefunds());
+    unawaited(context.read<ExpenseProvider>().loadExpenses());
+    unawaited(context.read<GrnProvider>().loadNotes());
+    unawaited(context.read<PurchaseOrderProvider>().loadOrders());
+    unawaited(context.read<SupplierProvider>().loadSuppliers());
+    unawaited(context.read<CustomerProvider>().loadCustomers());
+    unawaited(context.read<ProductProvider>().loadProducts());
   }
 
   void _handleNavigation(int index) {
@@ -190,6 +199,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _toggleSidebar() {
     setState(() {
+      _sidebarTouched = true;
       _sidebarCollapsed = !_sidebarCollapsed;
     });
   }
@@ -231,15 +241,16 @@ class _HomeScreenState extends State<HomeScreen>
   List<Widget> _getAdminScreens() => [
         DashboardScreen(
           onNavigateToPos: () => _handleNavigation(1),
-          onNavigateToRefunds: () => _handleNavigation(7),
+          onNavigateToRefunds: () => _handleNavigation(8),
           onNavigateToInventory: () => _handleNavigation(2),
-          onNavigateToReports: () => _handleNavigation(13),
-          onNavigateToSettings: () => _handleNavigation(14),
+          onNavigateToReports: () => _handleNavigation(14),
+          onNavigateToSettings: () => _handleNavigation(15),
         ),
         const PosScreen(),
         const InventoryScreen(),
         const GrnScreen(),
         const BatchManagementScreen(),
+        const ExpiryScreen(),
         const PurchaseOrderScreen(),
         const SupplierScreen(),
         const RefundReturnScreen(),
@@ -250,16 +261,20 @@ class _HomeScreenState extends State<HomeScreen>
         const ReloadCardScreen(),
         const ReportsScreen(),
         const SettingsScreen(),
+        const ShoppingBagScreen(),
       ];
 
   List<Widget> _getCashierScreens() => [
         CashierDashboardScreen(
           onNavigateToPos: () => _handleNavigation(1),
-          onNavigateToRefunds: () => _handleNavigation(3),
+          onNavigateToRefunds: () => _handleNavigation(4),
         ),
         const PosScreen(),
         const GrnScreen(),
+        const ExpiryScreen(),
         const RefundReturnScreen(),
+        const ExpenseManagementScreen(),
+        const ReloadCardScreen(),
         const ProfileScreen(),
       ];
 
@@ -329,11 +344,13 @@ class _HomeScreenState extends State<HomeScreen>
                 child: Scaffold(
                   body: LayoutBuilder(
                     builder: (context, constraints) {
-                      // Auto-collapse the rail on narrow windows; the manual
-                      // toggle stays free once the window is wide enough.
+                      // Auto-collapse the rail on narrow windows until the
+                      // user touches the expand/collapse button — after that
+                      // the manual choice always wins.
                       final autoCollapsed = constraints.maxWidth <
                           AppBreakpoints.sidebarAutoCollapseBelow;
-                      final collapsed = _sidebarCollapsed || autoCollapsed;
+                      final collapsed =
+                          _sidebarTouched ? _sidebarCollapsed : autoCollapsed;
 
                       return Row(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -524,21 +541,9 @@ class CashierDashboardScreen extends StatefulWidget {
 
 class _CashierDashboardScreenState extends State<CashierDashboardScreen>
     with SingleTickerProviderStateMixin {
-  late Future<List<Sale>> _salesFuture;
   late AnimationController _entranceController;
   late Animation<double> _heroAnim;
-  late Animation<double> _kpiAnim;
-  late Animation<double> _stockAnim;
-  late Animation<double> _hourAnim;
-  late Animation<double> _payAnim;
-  late Animation<double> _recentAnim;
   bool _customerDisplayOn = CustomerDisplayService.instance.isConnected;
-
-  Animation<double> _step(Animation<double> parent, double start, double end) =>
-      CurvedAnimation(
-        parent: parent,
-        curve: Interval(start, end, curve: Curves.easeOutCubic),
-      );
 
   Widget _reveal(Animation<double> anim, Widget child) => FadeTransition(
         opacity: anim,
@@ -552,20 +557,14 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
   @override
   void initState() {
     super.initState();
-    _salesFuture = context.read<SalesProvider>().getAllSales();
     _entranceController = AnimationController(
-      duration: const Duration(milliseconds: 900),
+      duration: const Duration(milliseconds: 600),
       vsync: this,
     )..forward();
-    _heroAnim = _step(_entranceController, 0.0, 0.35);
-    _kpiAnim = _step(_entranceController, 0.2, 0.5);
-    _stockAnim = _step(_entranceController, 0.32, 0.6);
-    _hourAnim = _step(_entranceController, 0.42, 0.72);
-    _payAnim = _step(_entranceController, 0.55, 0.85);
-    _recentAnim = _step(_entranceController, 0.68, 1.0);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<RefundReturnProvider>().loadRefunds();
-    });
+    _heroAnim = CurvedAnimation(
+      parent: _entranceController,
+      curve: Curves.easeOutCubic,
+    );
   }
 
   @override
@@ -574,14 +573,15 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
     super.dispose();
   }
 
+  /// Pull-to-refresh re-syncs the customer display with the POS cart so both
+  /// screens always show the same content.
   Future<void> _refresh() async {
-    await context.read<RefundReturnProvider>().loadRefunds();
-    if (!mounted) {
-      return;
+    await CustomerDisplayService.instance.syncNow();
+    if (mounted) {
+      setState(() {
+        _customerDisplayOn = CustomerDisplayService.instance.isConnected;
+      });
     }
-    setState(() {
-      _salesFuture = context.read<SalesProvider>().getAllSales();
-    });
   }
 
   Future<void> _toggleCustomerDisplay() async {
@@ -595,156 +595,43 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
     if (on) {
       unawaited(CustomerDisplayService.instance.syncNow());
     }
-    if (mounted) {
-      final err = CustomerDisplayService.instance.lastError;
-      showTopSnackBar(context,
-        SnackBar(
-          content: Text(on
-              ? 'Customer Display is now showing on the second screen'
-              : err != null
-                  ? 'Customer Display could not open: $err'
-                  : 'Customer Display closed'),
-          duration: const Duration(seconds: 4),
-        ),
-      );
-    }
+    final err = CustomerDisplayService.instance.lastError;
+    showTopSnackBar(
+      context,
+      SnackBar(
+        content: Text(on
+            ? 'Customer Display is now showing on the second screen'
+            : err != null
+                ? 'Customer Display could not open: $err'
+                : 'Customer Display closed'),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final user = context.read<AuthProvider>().currentUser;
-    final now = DateTime.now();
-    final todayStart = DateTime(now.year, now.month, now.day);
-    final tomorrowStart = todayStart.add(const Duration(days: 1));
 
     return RefreshIndicator(
       onRefresh: _refresh,
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            FutureBuilder<List<Sale>>(
-              future: _salesFuture,
-              builder: (context, snapshot) {
-                final sales = snapshot.data ?? const <Sale>[];
-                final myTodaySales = sales.where((sale) {
-                  final saleDate = sale.saleDate;
-                  return sale.cashierId == user?.id &&
-                      saleDate.isAfter(
-                          todayStart.subtract(const Duration(milliseconds: 1))) &&
-                      saleDate.isBefore(tomorrowStart);
-                }).toList();
-
-                final totalAmount = myTodaySales.fold<double>(
-                  0,
-                  (sum, sale) => sum + sale.totalAmount,
-                );
-                final itemsSold = myTodaySales.fold<double>(
-                  0,
-                  (sum, sale) => sum +
-                      sale.items.fold<double>(
-                          0, (s, item) => s + item.quantity),
-                );
-
-                return Consumer<RefundReturnProvider>(
-                  builder: (context, refundProvider, _) {
-                    final lowStockCount =
-                        context.read<ProductProvider>().getLowStockCount();
-                    final outOfStockCount =
-                        context.read<ProductProvider>().getOutOfStockCount();
-
-                    final myPendingReturns = refundProvider.refunds.where((refund) {
-                      if (refund.status != 'Pending') {
-                        return false;
-                      }
-                      final userId = user?.id ?? '';
-                      final userName = user?.fullName.toLowerCase() ?? '';
-                      if (userId.isNotEmpty && refund.requesterId == userId) {
-                        return true;
-                      }
-                      return userName.isNotEmpty &&
-                          refund.requesterName.toLowerCase() == userName;
-                    }).length;
-
-                    final myRequestsToday = refundProvider.refunds.where((refund) {
-                      final requestDate = refund.requestDate;
-                      final isToday = requestDate
-                              .isAfter(todayStart.subtract(const Duration(milliseconds: 1))) &&
-                          requestDate.isBefore(tomorrowStart);
-                      if (!isToday) {
-                        return false;
-                      }
-                      final userId = user?.id ?? '';
-                      final userName = user?.fullName.toLowerCase() ?? '';
-                      if (userId.isNotEmpty && refund.requesterId == userId) {
-                        return true;
-                      }
-                      return userName.isNotEmpty &&
-                          refund.requesterName.toLowerCase() == userName;
-                    }).length;
-
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _reveal(
-                          _heroAnim,
-                          _buildCashierHero(
-                            user: user,
-                            dateLabel: _headerDate(now),
-                            todaySales: myTodaySales,
-                            itemsSold: itemsSold,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        _reveal(
-                          _kpiAnim,
-                          _buildKpiRow(
-                            salesCount: myTodaySales.length,
-                            revenue: totalAmount,
-                            itemsSold: itemsSold,
-                            pendingReturns: myPendingReturns,
-                            requestsToday: myRequestsToday,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        if (lowStockCount + outOfStockCount > 0) ...[
-                          _reveal(
-                            _stockAnim,
-                            _buildStockBanner(
-                                low: lowStockCount, out: outOfStockCount),
-                          ),
-                          const SizedBox(height: 12),
-                        ],
-                        _reveal(_hourAnim, _buildHourlyChart(myTodaySales)),
-                        const SizedBox(height: 14),
-                        _reveal(_payAnim, _buildPaymentSplit(myTodaySales)),
-                        const SizedBox(height: 14),
-                        _reveal(
-                            _recentAnim, _buildRecentSales(myTodaySales)),
-                      ],
-                    );
-                  },
-                );
-              },
-            ),
-          ],
+        child: _reveal(
+          _heroAnim,
+          _buildCashierHero(user: user),
         ),
       ),
     );
   }
 
-  Widget _buildCashierHero({
-    required User? user,
-    required String dateLabel,
-    required List<Sale> todaySales,
-    required double itemsSold,
-  }) {
-    final total = todaySales.fold<double>(
-        0, (sum, sale) => sum + sale.totalAmount);
+  /// Cashier home: greeting + big touch-friendly action buttons only.
+  /// Business statistics / daily-sales analytics stay admin-only.
+  Widget _buildCashierHero({required User? user}) {
     final hasName = user?.fullName.trim().isNotEmpty ?? false;
-    final initial = hasName ? user!.fullName.trim()[0].toString().toUpperCase() : '?';
+    final initial =
+        hasName ? user!.fullName.trim()[0].toString().toUpperCase() : '?';
     final name = hasName ? user!.fullName : 'Cashier';
 
     return Container(
@@ -803,7 +690,7 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
                           '${_greetingForHour(DateTime.now().hour)} 👋',
                           style: TextStyle(
                             color: Colors.white.withOpacity(0.92),
-                            fontSize: 12,
+                            fontSize: 14,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -812,15 +699,15 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
                           name,
                           style: const TextStyle(
                             color: Colors.white,
-                            fontSize: 22,
+                            fontSize: 24,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                         Text(
-                          dateLabel,
+                          _headerDate(DateTime.now()),
                           style: TextStyle(
                             color: Colors.white.withOpacity(0.85),
-                            fontSize: 12,
+                            fontSize: 13,
                           ),
                         ),
                       ],
@@ -845,72 +732,10 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.14),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white24),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            "TODAY'S REVENUE",
-                            style: TextStyle(
-                              color: Colors.white70,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 1.2,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          FittedBox(
-                            fit: BoxFit.scaleDown,
-                            child: Text(
-                              'Rs ${total.toStringAsFixed(2)}',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 28,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          '${todaySales.length} sales',
-                          style: TextStyle(
-                            color: Colors.white.withOpacity(0.94),
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '${fmtQty(itemsSold)} items sold',
-                          style: TextStyle(
-                            color: Colors.white.withOpacity(0.8),
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 20),
               Wrap(
-                spacing: 10,
-                runSpacing: 10,
+                spacing: 12,
+                runSpacing: 12,
                 children: [
                   ElevatedButton.icon(
                     onPressed: widget.onNavigateToPos,
@@ -918,13 +743,29 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
                       backgroundColor: Colors.white,
                       foregroundColor: PosAppTheme.primaryGreen,
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 18, vertical: 12),
-                      textStyle: const TextStyle(fontWeight: FontWeight.bold),
+                          horizontal: 22, vertical: 18),
+                      textStyle: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(14)),
                     ),
-                    icon: const Icon(Icons.point_of_sale),
+                    icon: const Icon(Icons.point_of_sale, size: 26),
                     label: const Text('Start Billing'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: widget.onNavigateToRefunds,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: BorderSide(color: Colors.white.withOpacity(0.7)),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 22, vertical: 18),
+                      textStyle: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                    ),
+                    icon: const Icon(Icons.assignment_return, size: 26),
+                    label: const Text('Refunds'),
                   ),
                   OutlinedButton.icon(
                     onPressed: _toggleCustomerDisplay,
@@ -935,12 +776,14 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
                           : Colors.transparent,
                       side: BorderSide(color: Colors.white.withOpacity(0.7)),
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 18, vertical: 12),
+                          horizontal: 22, vertical: 18),
+                      textStyle: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(14)),
                     ),
                     icon: Icon(
-                        _customerDisplayOn ? Icons.tv_off : Icons.tv),
+                        _customerDisplayOn ? Icons.tv_off : Icons.tv, size: 26),
                     label: Text(_customerDisplayOn
                         ? 'Close Customer Display'
                         : 'Open Customer Display'),
@@ -965,527 +808,6 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
     );
   }
 
-  Widget _buildKpiRow({
-    required int salesCount,
-    required double revenue,
-    required double itemsSold,
-    required int pendingReturns,
-    required int requestsToday,
-  }) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final columns = constraints.maxWidth >= 1100
-            ? 4
-            : (constraints.maxWidth >= 700 ? 2 : 1);
-        return GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: columns,
-            mainAxisSpacing: 12,
-            crossAxisSpacing: 12,
-            childAspectRatio: columns == 1 ? 3.2 : 2.4,
-          ),
-          itemCount: 4,
-          itemBuilder: (context, index) => switch (index) {
-            0 => _kpiCard(
-                icon: Icons.receipt_long,
-                label: 'Sales Today',
-                value: '$salesCount',
-                color: PosAppTheme.accentBlue,
-              ),
-            1 => _kpiCard(
-                icon: Icons.payments,
-                label: 'Revenue Today',
-                value: 'Rs ${revenue.toStringAsFixed(0)}',
-                color: PosAppTheme.primaryGreen,
-              ),
-            2 => _kpiCard(
-                icon: Icons.shopping_basket,
-                label: 'Items Sold',
-                value: fmtQty(itemsSold),
-                color: PosAppTheme.warningOrange,
-              ),
-            _ => _kpiCard(
-                icon: Icons.assignment_return,
-                label: 'Pending Returns',
-                value: '$pendingReturns',
-                color: PosAppTheme.dangerRed,
-                sub: '$requestsToday mine today',
-              ),
-          },
-        );
-      },
-    );
-  }
-
-  Widget _kpiCard({
-    required IconData icon,
-    required String label,
-    required String value,
-    required Color color,
-    String? sub,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 12,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [color, color.withOpacity(0.75)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(14),
-              boxShadow: [
-                BoxShadow(
-                  color: color.withOpacity(0.35),
-                  blurRadius: 8,
-                  offset: const Offset(0, 3),
-                ),
-              ],
-            ),
-            child: Icon(icon, color: Colors.white, size: 24),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  label,
-                  style: const TextStyle(
-                      fontSize: 12, color: PosAppTheme.textGray),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: PosAppTheme.textDark,
-                  ),
-                ),
-                if (sub != null) ...[
-                  const SizedBox(height: 1),
-                  Text(
-                    sub,
-                    style: const TextStyle(
-                        fontSize: 10, color: PosAppTheme.textGray),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStockBanner({required int low, required int out}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFFFF6A00), Color(0xFFF7B733)],
-          begin: Alignment.centerLeft,
-          end: Alignment.centerRight,
-        ),
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFFFF6A00).withOpacity(0.3),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.warning_amber, color: Colors.white),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              '$low item(s) low on stock and $out item(s) out of stock — '
-              'please check inventory.',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHourlyChart(List<Sale> sales) {
-    final buckets = List<double>.filled(24, 0);
-    for (final sale in sales) {
-      buckets[sale.saleDate.hour] += sale.totalAmount;
-    }
-    final maxValue = buckets.reduce((a, b) => a > b ? a : b);
-    final hasData = maxValue > 0;
-    final rawMax = maxValue * 1.25;
-    final maxY = hasData && rawMax >= 10 ? rawMax : 10.0;
-
-    return _card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            "Today's Sales by Hour",
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            "How today's revenue built up hour by hour",
-            style: TextStyle(fontSize: 12, color: PosAppTheme.textGray),
-          ),
-          const SizedBox(height: 16),
-          SizedBox(
-            height: 220,
-            child: hasData
-                ? BarChart(
-                    BarChartData(
-                      maxY: maxY,
-                      gridData: FlGridData(
-                        show: true,
-                        drawVerticalLine: false,
-                        horizontalInterval: maxY / 4,
-                      ),
-                      borderData: FlBorderData(show: false),
-                      titlesData: FlTitlesData(
-                        leftTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 52,
-                            interval: maxY / 4,
-                            getTitlesWidget: (value, meta) => Text(
-                              value >= 1000
-                                  ? 'Rs ${(value / 1000).toStringAsFixed(1)}k'
-                                  : 'Rs ${value.toInt()}',
-                              style: const TextStyle(fontSize: 9),
-                            ),
-                          ),
-                        ),
-                        bottomTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            interval: 1,
-                            getTitlesWidget: (value, meta) {
-                              final i = value.toInt();
-                              if (i % 3 != 0) return const SizedBox.shrink();
-                              return Padding(
-                                padding: const EdgeInsets.only(top: 6),
-                                child: Text(
-                                  '$i:00',
-                                  style: const TextStyle(fontSize: 9),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                        rightTitles: const AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                        topTitles: const AxisTitles(
-                          sideTitles: SideTitles(showTitles: false),
-                        ),
-                      ),
-                      barTouchData: BarTouchData(
-                        touchTooltipData: BarTouchTooltipData(
-                          getTooltipItem: (group, groupIndex, rod, rodIndex) =>
-                              BarTooltipItem(
-                            '${group.x.toInt()}:00\n'
-                            'Rs ${rod.toY.toStringAsFixed(2)}',
-                            const TextStyle(
-                                color: Colors.white, fontSize: 12),
-                          ),
-                        ),
-                      ),
-                      barGroups: List.generate(
-                        24,
-                        (i) => BarChartGroupData(
-                          x: i,
-                          barRods: [
-                            BarChartRodData(
-                              toY: buckets[i],
-                              width: 8,
-                              gradient: const LinearGradient(
-                                colors: [Color(0xFF11998E), Color(0xFF38EF7D)],
-                                begin: Alignment.bottomCenter,
-                                end: Alignment.topCenter,
-                              ),
-                              borderRadius: BorderRadius.circular(3),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  )
-                : const Center(
-                    child: Text(
-                      'No sales yet today',
-                      style: TextStyle(color: PosAppTheme.textGray),
-                    ),
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPaymentSplit(List<Sale> sales) {
-    final totals = <String, double>{};
-    for (final sale in sales) {
-      final key = sale.paymentMethod.trim().toLowerCase();
-      totals[key] = (totals[key] ?? 0) + sale.totalAmount;
-    }
-    final total = totals.values.fold<double>(0, (a, b) => a + b);
-    const labelColors = {
-      'cash': Color(0xFF11998E),
-      'card': Color(0xFF4568DC),
-      'cash + card': Color(0xFF8E54E9),
-      'cash+card': Color(0xFF8E54E9),
-    };
-    final entries = totals.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-
-    return _card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Payments Today',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            "How today's takings were paid",
-            style: TextStyle(fontSize: 12, color: PosAppTheme.textGray),
-          ),
-          const SizedBox(height: 16),
-          if (entries.isEmpty)
-            const Center(
-              child: Text(
-                'No payments yet today',
-                style: TextStyle(color: PosAppTheme.textGray),
-              ),
-            )
-          else
-            ...entries.map((entry) {
-              final color = labelColors[entry.key] ?? PosAppTheme.primaryGreen;
-              final percent = total > 0 ? (entry.value / total) * 100 : 0.0;
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 14),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          width: 12,
-                          height: 12,
-                          decoration: BoxDecoration(
-                            color: color,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            _capitalize(entry.key),
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        Text(
-                          'Rs ${entry.value.toStringAsFixed(0)}',
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        SizedBox(
-                          width: 44,
-                          child: Text(
-                            '${percent.toStringAsFixed(0)}%',
-                            textAlign: TextAlign.right,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey[600],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: LinearProgressIndicator(
-                        value: total > 0
-                            ? (entry.value / total).clamp(0, 1)
-                            : 0,
-                        minHeight: 8,
-                        backgroundColor: color.withOpacity(0.15),
-                        valueColor: AlwaysStoppedAnimation(color),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRecentSales(List<Sale> sales) {
-    return _card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  "Today's Sales",
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                ),
-              ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: PosAppTheme.primaryGreen.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  '${sales.length} bills',
-                  style: const TextStyle(
-                    color: PosAppTheme.primaryGreen,
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          if (sales.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 16),
-              child: Center(
-                child: Text(
-                  'No sales recorded yet for today.',
-                  style: TextStyle(color: PosAppTheme.textGray),
-                ),
-              ),
-            )
-          else
-            ...sales.take(5).map((sale) {
-              final time = sale.saleDate.toLocal();
-              final hh = time.hour.toString().padLeft(2, '0');
-              final mm = time.minute.toString().padLeft(2, '0');
-              return Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade50,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey.shade200),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: PosAppTheme.accentBlue.withOpacity(0.12),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(
-                        Icons.receipt_long,
-                        size: 18,
-                        color: PosAppTheme.accentBlue,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            sale.invoiceLabel,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                            ),
-                          ),
-                          Text(
-                            '$hh:$mm • ${sale.items.length} items',
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: PosAppTheme.textGray,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Text(
-                      'Rs ${sale.totalAmount.toStringAsFixed(2)}',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 13,
-                        color: PosAppTheme.primaryGreen,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
-        ],
-      ),
-    );
-  }
-
-  Widget _card({required Widget child}) {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 12,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: child,
-    );
-  }
-
   String _greetingForHour(int hour) {
     if (hour >= 5 && hour < 12) return 'Good Morning';
     if (hour >= 12 && hour < 17) return 'Good Afternoon';
@@ -1504,8 +826,4 @@ class _CashierDashboardScreenState extends State<CashierDashboardScreen>
     return '${weekdays[date.weekday - 1]}, ${date.day} '
         '${months[date.month - 1]} ${date.year}';
   }
-
-  String _capitalize(String value) => value.isEmpty
-      ? value
-      : value[0].toUpperCase() + value.substring(1);
 }

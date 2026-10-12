@@ -107,8 +107,17 @@ class RefundReturnProvider extends ChangeNotifier {
         }
       }
 
+      // A loose line was sold in pieces, so only the fraction of a box it took
+      // may be put back; every other line goes back box for box.
+      final stockFactor = (originalLine != null &&
+              originalLine.loose &&
+              originalLine.piecesPerBox > 0)
+          ? 1.0 / originalLine.piecesPerBox
+          : 1.0;
+      final stockRestore = item.quantity * stockFactor;
+
       if (originalLine != null && originalLine.allocations.isNotEmpty) {
-        var remaining = item.quantity;
+        var remaining = stockRestore;
         for (final allocation in originalLine.allocations) {
           if (remaining <= 0) break;
           final take =
@@ -121,13 +130,13 @@ class RefundReturnProvider extends ChangeNotifier {
       final product = await _dbService.getProductById(item.productId);
       if (product != null) {
         final updatedProduct = product.copyWith(
-          quantity: product.quantity + item.quantity,
+          quantity: product.quantity + stockRestore,
         );
         await _dbService.updateProduct(updatedProduct);
         await _dbService.addStockHistory(
           item.productId,
           item.productName,
-          item.quantity,
+          stockRestore,
           'Refund: ${refund.id}',
         );
       }
