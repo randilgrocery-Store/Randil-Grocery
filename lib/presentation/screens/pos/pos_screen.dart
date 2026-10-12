@@ -1461,26 +1461,16 @@ class _PosScreenState extends State<PosScreen> {
     );
   }
 
-  /// Quick "add a shopping bag to the bill" action. The bag is an ordinary
-  /// product from the reserved Shopping Bags category, so it charges its set
-  /// price, prints on the bill, reduces bag stock and counts towards
-  /// profit & loss exactly like any other item.
+  /// Quick "add a shopping bag to the bill" action.
+  ///
+  /// This is a simple retail bag charge (Rs 3 / 5 / 10 / 20) for the little bags
+  /// a customer buys. It is intentionally NOT connected to the bulk "Shopping
+  /// Bags" section — that section tracks whole bundles the owner buys, uses and
+  /// resells, tracked separately from grocery stock. Here only the money goes on
+  /// the bill; no stock anywhere is moved.
   Future<void> _showBagDialog() async {
-    final db = DatabaseService();
-    var bags = await db.getShoppingBags();
-    if (bags.isEmpty) {
-      bags = await db.ensureDefaultShoppingBags();
-    }
-    if (!mounted) return;
-
-    if (bags.isEmpty) {
-      _showSnackBar(
-        'No shopping bags — add them under Shopping Bags in the menu',
-      );
-      return;
-    }
-
-    var selectedId = bags.first.id;
+    const tiers = <double>[3, 5, 10, 20];
+    var selectedPrice = tiers.first;
     var qty = 1.0;
     final symbol = context.read<SettingsProvider>().settings.currencySymbol;
 
@@ -1488,11 +1478,6 @@ class _PosScreenState extends State<PosScreen> {
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (dialogContext, setDialogState) {
-          final selected = bags.firstWhere(
-            (b) => b.id == selectedId,
-            orElse: () => bags.first,
-          );
-          final out = selected.quantity <= 0;
           return AlertDialog(
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16),
@@ -1510,86 +1495,68 @@ class _PosScreenState extends State<PosScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    'Pick a bag, set how many the customer needs '
-                    '(bundles allowed), then Add.',
+                    'Pick the bag price and how many the customer needs '
+                    '(a bundle can be rung up as a quantity).',
                     style: TextStyle(
                       fontSize: 12,
                       color: Colors.grey.shade600,
                     ),
                   ),
                   const SizedBox(height: 12),
-                  for (final bag in bags)
-                    RadioListTile<String>(
-                      value: bag.id,
-                      groupValue: selectedId,
+                  for (final price in tiers)
+                    RadioListTile<double>(
+                      value: price,
+                      groupValue: selectedPrice,
                       dense: true,
                       contentPadding: EdgeInsets.zero,
                       title: Text(
-                        '${bag.label}  ·  $symbol '
-                        '${bag.price.toStringAsFixed(2)}',
-                        style: TextStyle(
+                        '$symbol ${price.toStringAsFixed(0)} bag',
+                        style: const TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      subtitle: Text(
-                        bag.quantity > 0
-                            ? '${fmtQty(bag.quantity)} in stock'
-                            : 'Out of stock',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: bag.quantity > 0
-                              ? PosAppTheme.primaryGreen
-                              : PosAppTheme.dangerRed,
+                      onChanged: (value) {
+                        if (value != null) {
+                          setDialogState(() => selectedPrice = value);
+                        }
+                      },
+                    ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      IconButton.outlined(
+                        onPressed: qty > 1
+                            ? () => setDialogState(() => qty -= 1)
+                            : null,
+                        icon: const Icon(Icons.remove, size: 18),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        child: Text(
+                          fmtQty(qty),
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
-                      onChanged: bag.quantity > 0
-                          ? (value) {
-                              if (value != null) {
-                                setDialogState(() => selectedId = value);
-                              }
-                            }
-                          : null,
-                    ),
-                  if (!out) ...[
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        IconButton.outlined(
-                          onPressed: qty > 1
-                              ? () => setDialogState(() => qty -= 1)
-                              : null,
-                          icon: const Icon(Icons.remove, size: 18),
+                      IconButton.outlined(
+                        onPressed: () => setDialogState(() => qty += 1),
+                        icon: const Icon(Icons.add, size: 18),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        '$symbol ${(selectedPrice * qty).toStringAsFixed(2)}',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: PosAppTheme.primaryGreen,
                         ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 14),
-                          child: Text(
-                            fmtQty(qty),
-                            style: const TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                        IconButton.outlined(
-                          onPressed: qty < selected.quantity
-                              ? () => setDialogState(() => qty += 1)
-                              : null,
-                          icon: const Icon(Icons.add, size: 18),
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          '$symbol ${(selected.price * qty).toStringAsFixed(2)}',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                            color: PosAppTheme.primaryGreen,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -1599,15 +1566,14 @@ class _PosScreenState extends State<PosScreen> {
                 child: const Text('Not needed'),
               ),
               ElevatedButton.icon(
-                onPressed: out
-                    ? null
-                    : () async {
-                        await context
-                            .read<SalesProvider>()
-                            .addBagToCart(selected, qty);
-                        await SoundService.playBeep();
-                        if (mounted) Navigator.pop(dialogContext);
-                      },
+                onPressed: () async {
+                  await context.read<SalesProvider>().addBagChargeToCart(
+                        price: selectedPrice,
+                        quantity: qty,
+                      );
+                  await SoundService.playBeep();
+                  if (mounted) Navigator.pop(dialogContext);
+                },
                 icon: const Icon(Icons.add_shopping_cart, size: 18),
                 label: const Text('Add to Bill'),
               ),

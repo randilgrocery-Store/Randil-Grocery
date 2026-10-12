@@ -109,13 +109,13 @@ class ProfitLossPanel extends StatelessWidget {
                     const SizedBox(height: 10),
                     _sectionLabel(context, 'Shopping Bags',
                         Icons.shopping_bag, _blue),
-                    _line(context, 'Bags sold', pl.d('bagSoldValue'),
-                        hint: '${_qty(pl.d('bagSoldQty'))} bags • '
+                    _line(context, 'Bundles sold', pl.d('bagSoldValue'),
+                        hint: '${_qty(pl.d('bagSoldQty'))} bundles • '
                             'profit ${_rs(pl.d('bagSoldValue') - pl.d('bagSoldCost'))}',
                         icon: Icons.sell_outlined),
-                    _line(context, 'Bags used in the shop', -pl.d('bagUsedCost'),
+                    _line(context, 'Bundles used in the shop', -pl.d('bagUsedCost'),
                         negative: true,
-                        hint: '${_qty(pl.d('bagUsedQty'))} bags taken for '
+                        hint: '${_qty(pl.d('bagUsedQty'))} bundles taken for '
                             'packing / shop use',
                         icon: Icons.storefront_outlined),
                     const SizedBox(height: 14),

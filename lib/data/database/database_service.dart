@@ -899,6 +899,21 @@ class DatabaseService {
       }
     }
 
+    // One-time cleanup: the first release auto-created four Rs 3 / 5 / 10 / 20
+    // "bag tier" rows. Bags are now bought, used and sold as whole bulk
+    // bundles, so drop those untouched seeded rows (never a row that has stock
+    // or usage history) to leave the owner with a clean, empty bulk list.
+    try {
+      await db.rawDelete(
+        "DELETE FROM shopping_bags WHERE quantity = 0 AND label IN "
+        "('Rs 3 bag', 'Rs 5 bag', 'Rs 10 bag', 'Rs 20 bag') "
+        "AND id NOT IN (SELECT DISTINCT bagId FROM shopping_bag_usage)",
+      );
+    } catch (e) {
+      developer.log('legacy shopping-bag cleanup error: $e',
+          name: 'DatabaseService');
+    }
+
     // Shop Settings Table
     final settingsTableExists = await _tableExists(db, 'shop_settings');
     if (!settingsTableExists) {
@@ -2002,39 +2017,10 @@ class DatabaseService {
       final now = DateTime.now().toIso8601String();
       for (final item in items) {
         if (item.isBag) {
-          // Shopping-bag line: no grocery product or FIFO batch moves. The
-          // bag's own stock is adjusted and the movement logged in the SAME
-          // transaction as the bill, so the bag count can never drift from the
-          // sales recorded.
-          final bagMaps = await txn.query(
-            'shopping_bags',
-            where: 'id = ?',
-            whereArgs: [item.bagId],
-            limit: 1,
-          );
-          if (bagMaps.isNotEmpty) {
-            final bag = ShoppingBag.fromMap(bagMaps.first);
-            final next =
-                (bag.quantity - item.stockQuantity).clamp(0.0, double.infinity);
-            await txn.update(
-              'shopping_bags',
-              {'quantity': next, 'updatedAt': now},
-              where: 'id = ?',
-              whereArgs: [item.bagId],
-            );
-            await txn.insert(
-              'shopping_bag_usage',
-              ShoppingBagUsage(
-                bagId: bag.id,
-                bagLabel: bag.label,
-                bagPrice: item.bagPrice > 0 ? item.bagPrice : item.unitPrice,
-                bagCost: item.bagCost,
-                quantity: item.stockQuantity,
-                type: 'customer_sell',
-                saleId: sale.id,
-              ).toMap(),
-            );
-          }
+          // Retail bag charge on the bill (Rs 3 / 5 / 10 / 20). It is NOT
+          // connected to the bulk Shopping Bags stock — that section tracks
+          // whole bundles the owner buys, uses and resells. Here we only keep
+          // the money on the bill, so skip all product/bag stock movement.
           continue;
         }
         // Stock is tracked in the product's own unit (boxes). A loose line
@@ -2090,29 +2076,7 @@ class DatabaseService {
     BackupService.notifyTransaction('bill');
   }
 
-  // ============== SHOPPING BAGS (separate stock & usage) ==============
-
-  /// Seeds the standard bag tiers (Rs 3 / Rs 5 / Rs 10 / Rs 20) on first run.
-  /// The shop owner can edit the labels, prices and costs in the Shopping Bags
-  /// section afterwards.
-  Future<List<ShoppingBag>> ensureDefaultShoppingBags() async {
-    final existing = await getShoppingBags();
-    if (existing.isNotEmpty) return existing;
-    const tiers = <(String, double)>[
-      ('Rs 3 bag', 3),
-      ('Rs 5 bag', 5),
-      ('Rs 10 bag', 10),
-      ('Rs 20 bag', 20),
-    ];
-    for (final tier in tiers) {
-      await upsertShoppingBag(ShoppingBag(
-        label: tier.$1,
-        price: tier.$2.toDouble(),
-        buyingPrice: 0,
-      ));
-    }
-    return getShoppingBags();
-  }
+  // ============== SHOPPING BAGS (bulk bundles, separate stock & usage) ======
 
   Future<List<ShoppingBag>> getShoppingBags() async {
     final db = await database;
@@ -2132,9 +2096,9 @@ class DatabaseService {
     return ShoppingBag.fromMap(maps.first);
   }
 
-  /// Adds a bag tier or saves an edit (label, price, cost). Quantity is not
-  /// changed here — use [recordShoppingBagMovement] so every stock change is
-  /// logged for the daily sold / shop-use report.
+  /// Adds a bulk bag or saves an edit (name, bundle buying/selling price).
+  /// Quantity is not changed here — use [recordShoppingBagMovement] so every
+  /// stock change is logged for the daily sold / shop-use report.
   Future<void> upsertShoppingBag(ShoppingBag bag) async {
     final db = await database;
     bag.updatedAt = DateTime.now();
@@ -3189,16 +3153,26 @@ class DatabaseService {
       }
     }
 
+    final bagSoldValue = (bagUsageSummary['soldValue'] as num?)?.toDouble() ?? 0;
+    final bagSoldCost = (bagUsageSummary['soldCost'] as num?)?.toDouble() ?? 0;
+    final bagUsedCost = (bagUsageSummary['usedCost'] as num?)?.toDouble() ?? 0;
     final totalLoss = cogs +
         wastageLoss +
         refundLoss +
         expenseTotal +
-        ((bagUsageSummary['usedCost'] as num?)?.toDouble() ?? 0);
-    // Reload margin is additional income the shop earned, independent of the
-    // till's bills, so it is added after the running costs are taken off. A
+        bagSoldCost +
+        bagUsedCost;
+    // Bulk bag sales are not rung up on a bill (they live in the bag ledger),
+    // so their takings are added to income here; their cost sits in totalLoss
+    // above. Reload margin is additional income the shop earned, independent of
+    // the till's bills, so it is added after the running costs are taken off. A
     // supplier return is money that came back from a supplier (the goods were
     // already counted in an earlier GRN), so it increases the bottom line too.
-    final netProfit = revenue + reloadProfit + supplierReturnsValue - totalLoss;
+    final netProfit = revenue +
+        reloadProfit +
+        supplierReturnsValue +
+        bagSoldValue -
+        totalLoss;
 
     return {
       'revenue': revenue,

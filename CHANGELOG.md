@@ -5,6 +5,30 @@ All notable changes to Randil Grocery POS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.17] - 2026-10-12
+
+### Changed
+- **Shopping Bags is now a bulk-bundle section, fully separate from grocery
+  stock.** The owner adds each bulk bag he buys (name + buying price per bundle
+  + selling price per bundle), restocks whole bundles, and then records from the
+  section either **bundles used in the shop** or **bundles sold to a customer**.
+  Stock is counted in whole bundles only (one bundle taken = one bundle off the
+  bought stock) — no counting little bags one by one.
+- The section shows today's totals: bundles in stock and stock value at cost,
+  bundles sold (with profit), and bundles used in the shop (with cost), plus a
+  **Recent activity** history.
+- The dashboard Profit & Loss panel now reports **Bundles sold** and **Bundles
+  used in the shop**, and the year/period net profit counts bulk-bag sales
+  revenue and cost correctly.
+
+### Fixed
+- **The POS Rs 3 / 5 / 10 / 20 bag charge is no longer mixed into the bulk
+  Shopping Bags section.** It is once again a plain bill charge for the little
+  bags a customer buys (optionally, with a quantity/bundle), and it never moves
+  the bulk bundle stock or the shop-use ledger.
+- Removed the auto-created "Rs 3/5/10/20 bag" rows from earlier builds; the
+  section now starts empty so the owner adds his own bulk bags.
+
 ## [1.1.11] - 2026-10-10
 
 ### Fixed

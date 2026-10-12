@@ -7,7 +7,6 @@ import '../../data/models/cart_item.dart';
 import '../../data/models/held_bill.dart';
 import '../../data/models/product.dart';
 import '../../data/models/sale.dart';
-import '../../data/models/shopping_bag.dart';
 import '../../data/services/network_sync.dart';
 import '../../data/services/stock_sync.dart';
 import '../../data/services/supabase_sync_service.dart';
@@ -108,51 +107,46 @@ class SalesProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Adds a shopping-bag line at the bag's set price (Rs 3 / 5 / 10 / 20...).
+  /// Adds a retail shopping-bag charge to the bill (Rs 3 / 5 / 10 / 20 …).
   ///
-  /// Bags are not grocery products: the line carries a lightweight stub product
-  /// purely so the cart, bill, reports and LAN mirror treat it like any other
-  /// line, while the bag's own stock / usage is handled by the
-  /// `shopping_bags` / `shopping_bag_usage` tables (see
-  /// `DatabaseService.completeSale`). The price charged is always the bag's
-  /// price [bag.price], never a batch/FIFO price.
-  Future<void> addBagToCart(ShoppingBag bag, double quantity) async {
-    if (bag.quantity <= 0 || quantity <= 0) return;
-    final lineId = 'bag:${bag.id}';
+  /// This is deliberately independent of the bulk "Shopping Bags" section: it
+  /// is a plain bill charge for the little bags a customer buys, so it carries
+  /// no stock of its own and never touches the bulk bundle stock or usage
+  /// ledger. The money still shows on the bill, in reports and on the LAN
+  /// mirror like any other line. The same price reuses (tops up) its line.
+  Future<void> addBagChargeToCart({
+    required double price,
+    double quantity = 1,
+    String? label,
+  }) async {
+    if (price <= 0 || quantity <= 0) return;
+    final lineId = 'bag-charge:${price.toStringAsFixed(2)}';
 
     final index = _cartItems.indexWhere((i) => i.id == lineId);
     if (index >= 0) {
-      final updated = _cartItems[index];
-      final maxAddable =
-          (bag.quantity - updated.quantity).clamp(0.0, double.infinity);
-      if (maxAddable <= 0) return;
-      final add = quantity.clamp(0.0, maxAddable);
-      if (add <= 0) return;
-      updated.quantity += add;
+      _cartItems[index].quantity += quantity;
       notifyListeners();
       return;
     }
 
-    final add = quantity.clamp(0.0, bag.quantity);
-    if (add <= 0) return;
-
+    final name = label ?? 'Shopping Bag (Rs ${price.toStringAsFixed(0)})';
     final stub = Product(
-      name: bag.label,
-      barcode: 'BAG-${bag.id}',
+      name: name,
+      barcode: 'BAG-${price.toStringAsFixed(0)}',
       categoryId: '',
-      buyingPrice: bag.buyingPrice,
-      sellingPrice: bag.price,
-      quantity: bag.quantity,
+      buyingPrice: 0,
+      sellingPrice: price,
+      quantity: 0,
     );
     _cartItems.add(CartItem(
       id: lineId,
       product: stub,
-      quantity: add,
-      unitPrice: bag.price,
+      quantity: quantity,
+      unitPrice: price,
       isBag: true,
-      bagId: bag.id,
-      bagPrice: bag.price,
-      bagCost: bag.buyingPrice,
+      bagId: price.toStringAsFixed(2),
+      bagPrice: price,
+      bagCost: 0,
     ));
     notifyListeners();
   }
