@@ -9,6 +9,7 @@ import '../../providers/refund_return_provider.dart';
 import '../../providers/sales_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../widgets/custom_widgets.dart';
+import '../../widgets/date_range_filter_bar.dart';
 
 class RefundReturnScreen extends StatefulWidget {
   const RefundReturnScreen({super.key});
@@ -21,6 +22,19 @@ class _RefundReturnScreenState extends State<RefundReturnScreen> {
   final TextEditingController _saleSearchController = TextEditingController();
   String _selectedStatus = 'Pending';
   late Future<List<Sale>> _salesFuture;
+
+  // Date window for the refund queue list.
+  DateRangePreset _preset = DateRangePreset.all;
+  DateTimeRange? _customRange;
+
+  // Date window for finding a completed sale to return against.
+  DateRangePreset _salePreset = DateRangePreset.all;
+  DateTimeRange? _saleCustomRange;
+
+  DateWindow get _window =>
+      DateRangeFilterBar.windowFor(_preset, custom: _customRange);
+  DateWindow get _saleWindow =>
+      DateRangeFilterBar.windowFor(_salePreset, custom: _saleCustomRange);
 
   @override
   void initState() {
@@ -147,10 +161,24 @@ class _RefundReturnScreenState extends State<RefundReturnScreen> {
 
           final filteredRefunds = allRefunds
               .where((refund) => refund.status == _selectedStatus)
+              .where((refund) => _window.includes(refund.requestDate))
               .toList();
 
           return Column(
             children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                child: DateRangeFilterBar(
+                  selectedPreset: _preset,
+                  customRange: _customRange,
+                  onSelected: (preset, custom) {
+                    setState(() {
+                      _preset = preset;
+                      _customRange = custom;
+                    });
+                  },
+                ),
+              ),
               Container(
                 padding: const EdgeInsets.all(12),
                 child: SingleChildScrollView(
@@ -227,6 +255,9 @@ class _RefundReturnScreenState extends State<RefundReturnScreen> {
 
           final query = _saleSearchController.text.trim().toLowerCase();
           final filteredSales = sales.where((sale) {
+            if (!_saleWindow.includes(sale.saleDate)) {
+              return false;
+            }
             if (query.isEmpty) {
               return true;
             }
@@ -260,6 +291,19 @@ class _RefundReturnScreenState extends State<RefundReturnScreen> {
                         : null,
                     border: const OutlineInputBorder(),
                   ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+                child: DateRangeFilterBar(
+                  selectedPreset: _salePreset,
+                  customRange: _saleCustomRange,
+                  onSelected: (preset, custom) {
+                    setState(() {
+                      _salePreset = preset;
+                      _saleCustomRange = custom;
+                    });
+                  },
                 ),
               ),
               Container(
@@ -326,6 +370,34 @@ class _RefundReturnScreenState extends State<RefundReturnScreen> {
   }
 
   Future<void> _showCreateReturnDialog(Sale sale) async {
+    // Never allow the same sale to be returned twice. A pending/approved
+    // request is still live on the other PC, and a processed one means the
+    // stock and money already went back to the customer.
+    final existing = await context
+        .read<RefundReturnProvider>()
+        .getRefundsForSale(sale.id);
+    final active =
+        existing.where((r) => r.status != 'Rejected').toList();
+    if (active.isNotEmpty) {
+      if (!mounted) return;
+      final processed = active.any((r) => r.status == 'Processed');
+      showTopSnackBar(
+        context,
+        SnackBar(
+          content: Text(
+            processed
+                ? 'This bill was already returned and processed — no more '
+                    'refunds are allowed against ${sale.invoiceLabel}.'
+                : 'A ${active.first.status.toLowerCase()} return already '
+                    'exists for ${sale.invoiceLabel}. Wait for the admin to '
+                    'finish it before returning anything else.',
+          ),
+          backgroundColor: PosAppTheme.warningOrange,
+        ),
+      );
+      return;
+    }
+
     final result = await showDialog<_RefundRequestData>(
       context: context,
       builder: (context) => CreateReturnDialog(sale: sale),

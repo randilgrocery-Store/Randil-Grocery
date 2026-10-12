@@ -6,6 +6,7 @@ import '../../../data/database/database_service.dart';
 import '../../../data/models/shopping_bag.dart';
 import '../../providers/settings_provider.dart';
 import '../../widgets/custom_widgets.dart';
+import '../../widgets/date_range_filter_bar.dart';
 
 /// Dedicated "Shopping Bags" section.
 ///
@@ -29,6 +30,12 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
   Map<String, dynamic> _summary = const {};
   bool _loading = true;
 
+  DateRangePreset _preset = DateRangePreset.today;
+  DateTimeRange? _customRange;
+
+  DateWindow get _window =>
+      DateRangeFilterBar.windowFor(_preset, custom: _customRange);
+
   @override
   void initState() {
     super.initState();
@@ -37,12 +44,10 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
 
   Future<void> _load() async {
     setState(() => _loading = true);
-    final now = DateTime.now();
-    final dayStart = DateTime(now.year, now.month, now.day);
-    final dayEnd =
-        DateTime(now.year, now.month, now.day, 23, 59, 59, 999);
+    final window = _window;
     final bags = await _db.getShoppingBags();
-    final summary = await _db.getShoppingBagSummary(dayStart, dayEnd);
+    final summary = await _db.getShoppingBagSummary(
+        window.effectiveStart, window.effectiveEnd);
     if (!mounted) return;
     setState(() {
       _bags = bags;
@@ -93,7 +98,19 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
                     colors: [Color(0xFF11998E), Color(0xFF38EF7D)],
                   ),
                   SizedBox(height: responsive.paddingMedium),
-                  _summaryRow(symbol, responsive),
+                  DateRangeFilterBar(
+                    selectedPreset: _preset,
+                    customRange: _customRange,
+                    onSelected: (preset, custom) {
+                      setState(() {
+                        _preset = preset;
+                        _customRange = custom;
+                      });
+                      _load();
+                    },
+                  ),
+                  SizedBox(height: responsive.paddingMedium),
+                  _summaryRow(symbol, responsive, _window.label),
                   SizedBox(height: responsive.paddingMedium),
                   Row(
                     children: [
@@ -162,7 +179,8 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
         ),
       );
 
-  Widget _summaryRow(String symbol, ResponsiveSize responsive) {
+  Widget _summaryRow(
+      String symbol, ResponsiveSize responsive, String periodLabel) {
     final stock = _bags.fold<double>(0, (s, b) => s + b.quantity);
     final stockValue =
         _bags.fold<double>(0, (s, b) => s + b.buyingPrice * b.quantity);
@@ -195,14 +213,14 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
         _summaryChip(
           '${fmtQty(_s('soldQty'))} · $symbol '
           '${_s('soldValue').toStringAsFixed(2)}',
-          'Sold to customers today',
+          'Sold to customers ($periodLabel)',
           Icons.sell_outlined,
           PosAppTheme.successGreen,
           responsive,
         ),
         _summaryChip(
           '$symbol ${soldProfit.toStringAsFixed(2)}',
-          'Profit on bag sales today',
+          'Profit on bag sales ($periodLabel)',
           Icons.trending_up,
           PosAppTheme.successGreen,
           responsive,
@@ -210,7 +228,7 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
         _summaryChip(
           '${fmtQty(_s('usedQty'))} · $symbol '
           '${_s('usedCost').toStringAsFixed(2)}',
-          'Used in shop today (cost)',
+          'Used in shop ($periodLabel)',
           Icons.storefront_outlined,
           PosAppTheme.dangerRed,
           responsive,
@@ -580,23 +598,27 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
   }
 
   Future<void> _showHistory() async {
-    final rows = await _db.getShoppingBagUsageHistory(limit: 100);
+    final rows = await _db.getShoppingBagUsageHistory(limit: 500);
+    final window = _window;
+    final visible = window.isAll
+        ? rows
+        : rows.where((u) => window.includes(u.createdAt)).toList();
     if (!mounted) return;
     final symbol = context.read<SettingsProvider>().settings.currencySymbol;
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Recent bag activity'),
+        title: Text('Bag activity · ${window.label}'),
         content: SizedBox(
           width: 480,
           height: 420,
-          child: rows.isEmpty
-              ? const Center(child: Text('No bag movements yet'))
+          child: visible.isEmpty
+              ? const Center(child: Text('No bag movements in this period'))
               : ListView.separated(
-                  itemCount: rows.length,
+                  itemCount: visible.length,
                   separatorBuilder: (_, __) => const Divider(height: 1),
                   itemBuilder: (context, index) {
-                    final u = rows[index];
+                    final u = visible[index];
                     final isSell = u.type == 'customer_sell';
                     final isRestock = u.type == 'restock';
                     final label = isSell

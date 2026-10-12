@@ -14,6 +14,7 @@ import '../../theme/app_colors.dart';
 import '../../theme/app_money.dart';
 import '../../theme/app_typography.dart';
 import '../../widgets/custom_widgets.dart';
+import '../../widgets/date_range_filter_bar.dart';
 
 /// Reload (top-up) credit ledger.
 ///
@@ -28,6 +29,12 @@ class ReloadCardScreen extends StatefulWidget {
 }
 
 class _ReloadCardScreenState extends State<ReloadCardScreen> {
+  DateRangePreset _preset = DateRangePreset.all;
+  DateTimeRange? _customRange;
+
+  DateWindow get _window =>
+      DateRangeFilterBar.windowFor(_preset, custom: _customRange);
+
   @override
   void initState() {
     super.initState();
@@ -35,6 +42,11 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
       context.read<ReloadCardProvider>().loadCards();
     });
   }
+
+  /// Transactions inside the current date window.
+  List<ReloadCard> _inWindow(List<ReloadCard> cards) => _window.isAll
+      ? cards
+      : cards.where((c) => _window.includes(c.createdAt)).toList();
 
   Future<void> _buyDialog() async {
     final supplier = TextEditingController();
@@ -254,6 +266,20 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                   .currencySymbol;
               AppMoney.configure(currencySymbol: currency);
 
+              final shown = _inWindow(provider.cards);
+              final bought =
+                  shown.where((c) => c.status == 'bought').toList();
+              final sold = shown.where((c) => c.status == 'sold').toList();
+              final shownBoughtValue =
+                  bought.fold<double>(0, (s, c) => s + c.value);
+              final shownBoughtCost =
+                  bought.fold<double>(0, (s, c) => s + c.cost);
+              final shownSoldValue =
+                  sold.fold<double>(0, (s, c) => s + c.value);
+              final shownRemaining = shownBoughtValue - shownSoldValue;
+              final shownProfit =
+                  sold.fold<double>(0, (s, c) => s + (c.value - c.cost));
+
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -269,12 +295,12 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                               width: cardW,
                               child: KpiCard(
                                 label: 'Bought',
-                                value: AppMoney.format(provider.totalBoughtValue),
+                                value: AppMoney.format(shownBoughtValue),
                                 icon: Icons.add_shopping_cart,
                                 tone: StatusTone.primary,
                                 secondary: Text(
-                                  '${provider.boughtCount} purchase'
-                                  '${provider.boughtCount == 1 ? '' : 's'}',
+                                  '${bought.length} purchase'
+                                  '${bought.length == 1 ? '' : 's'}',
                                   style: t.caption,
                                 ),
                               ),
@@ -284,12 +310,12 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                             width: cardW,
                             child: KpiCard(
                               label: 'Sold',
-                              value: AppMoney.format(provider.totalSoldValue),
+                              value: AppMoney.format(shownSoldValue),
                               icon: Icons.sell,
                               tone: StatusTone.info,
                               secondary: Text(
-                                '${provider.soldCount} sale'
-                                '${provider.soldCount == 1 ? '' : 's'}',
+                                '${sold.length} sale'
+                                '${sold.length == 1 ? '' : 's'}',
                                 style: t.caption,
                               ),
                             ),
@@ -298,9 +324,9 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                             width: cardW,
                             child: KpiCard(
                               label: 'Remaining',
-                              value: AppMoney.format(provider.remainingValue),
+                              value: AppMoney.format(shownRemaining),
                               icon: Icons.account_balance_wallet,
-                              tone: provider.remainingValue > 0.005
+                              tone: shownRemaining > 0.005
                                   ? StatusTone.success
                                   : StatusTone.neutral,
                               secondary: Text(
@@ -314,14 +340,14 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                               width: cardW,
                               child: KpiCard(
                                 label: 'Profit',
-                                value: AppMoney.format(provider.totalProfit),
+                                value: AppMoney.format(shownProfit),
                                 icon: Icons.trending_up,
-                                tone: provider.totalProfit >= 0
+                                tone: shownProfit >= 0
                                     ? StatusTone.success
                                     : StatusTone.danger,
                                 secondary: Text(
-                                  provider.totalPurchaseCost > 0
-                                      ? 'on ${AppMoney.format(provider.totalSoldValue)} sold'
+                                  shownBoughtCost > 0
+                                      ? 'on ${AppMoney.format(shownSoldValue)} sold'
                                       : 'no reload sold yet',
                                   style: t.caption,
                                 ),
@@ -333,9 +359,20 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                     },
                   ),
                   const SizedBox(height: 20),
+                  DateRangeFilterBar(
+                    selectedPreset: _preset,
+                    customRange: _customRange,
+                    onSelected: (preset, custom) {
+                      setState(() {
+                        _preset = preset;
+                        _customRange = custom;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 20),
                   AppSectionHeader(
                     title: 'Transactions',
-                    subtitle: 'Every reload purchase and sale, newest first',
+                    subtitle: 'Newest first · ${_window.label}',
                     action: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -363,24 +400,27 @@ class _ReloadCardScreenState extends State<ReloadCardScreen> {
                         child: CircularProgressIndicator(),
                       ),
                     )
-                  else if (provider.cards.isEmpty)
+                  else if (shown.isEmpty)
                     EmptyState(
                       icon: Icons.sim_card,
-                      title: 'No reload yet',
-                      message: isAdmin
-                          ? 'Press "Buy Reload" to record reload bought from '
-                              'the ISP, then "Sell Reload" when a customer tops up.'
-                          : 'No reload available to sell yet — ask the admin '
-                              'to buy reload stock.',
+                      title: _window.isAll ? 'No reload yet' : 'Nothing in this period',
+                      message: _window.isAll
+                          ? (isAdmin
+                              ? 'Press "Buy Reload" to record reload bought from '
+                                  'the ISP, then "Sell Reload" when a customer tops up.'
+                              : 'No reload available to sell yet — ask the admin '
+                                  'to buy reload stock.')
+                          : 'No reload bought or sold ${_window.label.toLowerCase()}. '
+                              'Change the filter above to see other dates.',
                     )
                   else
                     Expanded(
                       child: ListView.separated(
-                        itemCount: provider.cards.length,
+                        itemCount: shown.length,
                         separatorBuilder: (context, index) =>
                             const SizedBox(height: 6),
                         itemBuilder: (context, i) => _TransactionTile(
-                          card: provider.cards[i],
+                          card: shown[i],
                           provider: provider,
                           isAdmin: isAdmin,
                         ),

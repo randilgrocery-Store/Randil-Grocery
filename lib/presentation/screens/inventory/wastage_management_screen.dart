@@ -10,6 +10,7 @@ import '../../providers/batch_provider.dart';
 import '../../providers/product_provider.dart';
 import '../../providers/wastage_provider.dart';
 import '../../widgets/custom_widgets.dart';
+import '../../widgets/date_range_filter_bar.dart';
 
 class WastageManagementScreen extends StatefulWidget {
   const WastageManagementScreen({super.key});
@@ -31,6 +32,12 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
 
   Map<String, dynamic>? _report;
 
+  DateRangePreset _preset = DateRangePreset.all;
+  DateTimeRange? _customRange;
+
+  DateWindow get _window =>
+      DateRangeFilterBar.windowFor(_preset, custom: _customRange);
+
   @override
   void initState() {
     super.initState();
@@ -41,12 +48,10 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
   }
 
   Future<void> _loadReport() async {
-    final now = DateTime.now();
-    final start = DateTime(now.year, now.month, now.day);
-    final end = start.add(const Duration(days: 1));
+    final window = _window;
     final report = await context
         .read<WastageProvider>()
-        .getWastageReport(start, end.subtract(const Duration(seconds: 1)));
+        .getWastageReport(window.effectiveStart, window.effectiveEnd);
     if (mounted) {
       setState(() => _report = report);
     }
@@ -95,7 +100,19 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
               ],
             ),
             const SizedBox(height: 16),
-            _SummaryRow(report: _report),
+            DateRangeFilterBar(
+              selectedPreset: _preset,
+              customRange: _customRange,
+              onSelected: (preset, custom) {
+                setState(() {
+                  _preset = preset;
+                  _customRange = custom;
+                });
+                _loadReport();
+              },
+            ),
+            const SizedBox(height: 16),
+            _SummaryRow(report: _report, periodLabel: _window.label),
             const SizedBox(height: 16),
             Expanded(
               child: Consumer<WastageProvider>(
@@ -103,12 +120,21 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                   if (provider.isLoading) {
                     return const Center(child: CircularProgressIndicator());
                   }
-                  final wastages = provider.wastages;
+                  final wastages = _window.isAll
+                      ? provider.wastages
+                      : provider.wastages
+                          .where((w) => _window.includes(w.wastageDate))
+                          .toList();
                   if (wastages.isEmpty) {
-                    return const EmptyState(
+                    return EmptyState(
                       icon: Icons.eco_outlined,
-                      title: 'No Wastage Recorded',
-                      message: 'Tap "Record Wastage" to log damaged or expired stock',
+                      title: _window.isAll
+                          ? 'No Wastage Recorded'
+                          : 'No wastage in this period',
+                      message: _window.isAll
+                          ? 'Tap "Record Wastage" to log damaged or expired stock'
+                          : 'No wastage ${_window.label.toLowerCase()}. '
+                              'Change the filter above to see other dates.',
                     );
                   }
                   return ListView.separated(
@@ -380,6 +406,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
                     wastageDate: selectedDate,
                   );
               if (!context.mounted) return;
+              await _loadReport();
               showTopSnackBar(
                 context,
                 SnackBar(
@@ -426,6 +453,7 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
     if (confirmed != true || !mounted) return;
     final ok = await context.read<WastageProvider>().deleteWastage(w.id);
     if (!mounted) return;
+    await _loadReport();
     showTopSnackBar(
       context,
       SnackBar(
@@ -745,9 +773,10 @@ class _WastageManagementScreenState extends State<WastageManagementScreen> {
 }
 
 class _SummaryRow extends StatelessWidget {
-  const _SummaryRow({required this.report});
+  const _SummaryRow({required this.report, required this.periodLabel});
 
   final Map<String, dynamic>? report;
+  final String periodLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -765,7 +794,7 @@ class _SummaryRow extends StatelessWidget {
         Expanded(
           child: _StatCard(
             icon: Icons.delete_sweep,
-            label: "Today's Units Wasted",
+            label: 'Units Wasted ($periodLabel)',
             value: fmtQty(totalUnits),
             color: PosAppTheme.dangerRed,
           ),
@@ -774,7 +803,7 @@ class _SummaryRow extends StatelessWidget {
         Expanded(
           child: _StatCard(
             icon: Icons.money_off,
-            label: "Today's Loss (Cost)",
+            label: 'Loss — Cost ($periodLabel)',
             value: 'Rs. ${totalLoss.toStringAsFixed(2)}',
             color: const Color(0xFFE67E22),
           ),

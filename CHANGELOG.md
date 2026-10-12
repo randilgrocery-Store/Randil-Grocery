@@ -5,6 +5,31 @@ All notable changes to Randil Grocery POS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.18] - 2026-10-12
+
+### Added
+- **Sort/filter every busy feature by date and month.** The **Reload Cards**,
+  **Wastage**, **Shopping Bags** and **Refund & Return** screens now share one
+  date filter bar — **All time / Today / Yesterday / This week / This month /
+  Last month / Custom range** — so the shop owner can pull up exactly the
+  period he wants (e.g. last month's reload profit, a week of wastage) without
+  scrolling the whole history.
+  - Reload Cards: the KPI cards (bought, sold, remaining, profit) and the
+    transaction list follow the selected period.
+  - Wastage: the units/loss summary cards and the wastage list follow the
+    selected period; the summary also refreshes after edit/delete now.
+  - Shopping Bags: the sold/used/profit summary chips and the activity history
+    follow the selected period (defaults to today).
+  - Refund & Return: the queue can be filtered by request date and the
+    "Create Return" sale list by sale date, so a return can be made against a
+    bill from any day, not just recent ones.
+
+### Fixed
+- **A completed bill can never be refunded twice.** Creating a return against a
+  sale that already has a Pending/Approved/Processed return is now blocked with
+  a clear message — previously the same sale could be submitted repeatedly
+  (double refund, double stock restock) when both PCs were in use.
+
 ## [1.1.17] - 2026-10-12
 
 ### Changed
