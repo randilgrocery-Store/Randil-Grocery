@@ -3,25 +3,17 @@ import 'package:provider/provider.dart';
 
 import '../../../core/constants/responsive.dart';
 import '../../../data/database/database_service.dart';
-import '../../../data/models/product.dart';
-import '../../providers/auth_provider.dart';
-import '../../providers/category_provider.dart';
-import '../../providers/product_provider.dart';
+import '../../../data/models/shopping_bag.dart';
 import '../../providers/settings_provider.dart';
 import '../../widgets/custom_widgets.dart';
 
-/// Dedicated section for shopping bags ("carrier bags").
+/// Dedicated "Shopping Bags" section.
 ///
-/// Bags are ordinary [Product] rows that live in the reserved
-/// [DatabaseService.shoppingBagCategoryName] category, so they share the exact
-/// same machinery as every other item: stock counts, FIFO costing, bill
-/// printing, profit & loss and LAN mirroring. This screen is only a focused
-/// view on top of that so the shopkeeper can:
-///
-///  * add a bag with its buying price (cost per bundle) and selling price,
-///  * top up stock,
-///  * record bags taken out of stock for the shop's own use (a wastage at cost,
-///    which flows into profit & loss as an expense).
+/// Bags are tracked completely separately from grocery stock (their own
+/// `shopping_bags` table): this screen manages the bag tiers and keeps the
+/// daily ledger of how bags were used — sold to customers vs used for the
+/// shop's own packing. Both numbers also appear on the dashboard's
+/// Profit & Loss panel.
 class ShoppingBagScreen extends StatefulWidget {
   const ShoppingBagScreen({super.key});
 
@@ -30,7 +22,10 @@ class ShoppingBagScreen extends StatefulWidget {
 }
 
 class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
-  String _bagCategoryId = '';
+  final DatabaseService _db = DatabaseService();
+  List<ShoppingBag> _bags = [];
+  Map<String, dynamic> _summary = const {};
+  bool _loading = true;
 
   @override
   void initState() {
@@ -39,26 +34,27 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
   }
 
   Future<void> _load() async {
-    final category =
-        await DatabaseService().ensureShoppingBagCategory();
+    setState(() => _loading = true);
+    final now = DateTime.now();
+    final dayStart = DateTime(now.year, now.month, now.day);
+    final dayEnd =
+        DateTime(now.year, now.month, now.day, 23, 59, 59, 999);
+    final bags = await _db.ensureDefaultShoppingBags();
+    final summary = await _db.getShoppingBagSummary(dayStart, dayEnd);
     if (!mounted) return;
-    await context.read<CategoryProvider>().loadCategories();
-    if (!mounted) return;
-    setState(() => _bagCategoryId = category.id);
-    await context.read<ProductProvider>().loadProducts();
+    setState(() {
+      _bags = bags;
+      _summary = summary;
+      _loading = false;
+    });
   }
 
-  List<Product> _bags() {
-    if (_bagCategoryId.isEmpty) return const [];
-    final all = context.read<ProductProvider>().allProducts;
-    return all.where((p) => p.categoryId == _bagCategoryId).toList()
-      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-  }
+  double _s(String key) => ((_summary[key] as num?)?.toDouble()) ?? 0;
 
   @override
   Widget build(BuildContext context) {
     final responsive = context.responsive;
-    final currency = context.watch<SettingsProvider>().settings.currencySymbol;
+    final symbol = context.watch<SettingsProvider>().settings.currencySymbol;
 
     return Scaffold(
       appBar: AppBar(
@@ -71,81 +67,62 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
             ),
           ),
         ),
-        actions: [
-          Tooltip(
-            message: 'Add Shopping Bag',
-            child: IconButton(
-              icon: const Icon(Icons.add),
-              onPressed: _showAddBagDialog,
-            ),
-          ),
-          const SizedBox(width: 16),
-        ],
       ),
-      body: Consumer2<ProductProvider, CategoryProvider>(
-        builder: (context, productProvider, categoryProvider, _) {
-          final bags = _bags();
-          return Padding(
-            padding: EdgeInsets.all(responsive.paddingMedium),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const DashboardHeroPanel(
-                  title: 'Shopping Bags',
-                  subtitle:
-                      'Sell bag bundles to customers and track bags used in the shop',
-                  icon: Icons.shopping_bag,
-                  colors: [Color(0xFF11998E), Color(0xFF38EF7D)],
-                ),
-                SizedBox(height: responsive.paddingMedium),
-                Row(
-                  children: [
-                    Text(
-                      'Bags',
-                      style: TextStyle(
-                        fontSize: responsive.heading2,
-                        fontWeight: FontWeight.bold,
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : Padding(
+              padding: EdgeInsets.all(responsive.paddingMedium),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const DashboardHeroPanel(
+                    title: 'Shopping Bags',
+                    subtitle:
+                        'Sell bags to customers and record bags used in the shop '
+                        '— tracked separately from grocery stock',
+                    icon: Icons.shopping_bag,
+                    colors: [Color(0xFF11998E), Color(0xFF38EF7D)],
+                  ),
+                  SizedBox(height: responsive.paddingMedium),
+                  _summaryRow(symbol, responsive),
+                  SizedBox(height: responsive.paddingMedium),
+                  Row(
+                    children: [
+                      Text(
+                        'Bag tiers',
+                        style: TextStyle(
+                          fontSize: responsive.heading2,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                    ),
-                    const Spacer(),
-                    ElevatedButton.icon(
-                      onPressed: _showAddBagDialog,
-                      icon: const Icon(Icons.add),
-                      label: const Text('Add Bag'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: PosAppTheme.primaryGreen,
+                      const Spacer(),
+                      ElevatedButton.icon(
+                        onPressed: () => _showBagDialog(),
+                        icon: const Icon(Icons.add),
+                        label: const Text('Add Tier'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: PosAppTheme.primaryGreen,
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: responsive.paddingMedium),
+                  if (_bags.isEmpty)
+                    Expanded(child: _emptyState(responsive))
+                  else ...[
+                    Expanded(
+                      child: ListView.separated(
+                        itemCount: _bags.length,
+                        separatorBuilder: (_, __) =>
+                            SizedBox(height: responsive.paddingSmall),
+                        itemBuilder: (context, index) =>
+                            _bagTile(_bags[index], symbol, responsive),
                       ),
                     ),
                   ],
-                ),
-                SizedBox(height: responsive.paddingMedium),
-                if (productProvider.isLoading && bags.isEmpty)
-                  const Expanded(
-                    child: Center(child: CircularProgressIndicator()),
-                  )
-                else if (bags.isEmpty)
-                  Expanded(child: _emptyState(responsive))
-                else ...[
-                  _summaryRow(bags, currency, responsive),
-                  SizedBox(height: responsive.paddingMedium),
-                  Expanded(
-                    child: ListView.separated(
-                      itemCount: bags.length,
-                      separatorBuilder: (_, __) =>
-                          SizedBox(height: responsive.paddingSmall),
-                      itemBuilder: (context, index) => _bagTile(
-                        bags[index],
-                        currency,
-                        responsive,
-                      ),
-                    ),
-                  ),
                 ],
-              ],
+              ),
             ),
-          );
-        },
-      ),
     );
   }
 
@@ -153,14 +130,11 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
-              Icons.shopping_bag_outlined,
-              size: responsive.iconLarge,
-              color: PosAppTheme.textGray,
-            ),
+            Icon(Icons.shopping_bag_outlined,
+                size: responsive.iconLarge, color: PosAppTheme.textGray),
             SizedBox(height: responsive.paddingMedium),
             Text(
-              'No Shopping Bags Yet',
+              'No bag tiers yet',
               style: TextStyle(
                 fontSize: responsive.heading3,
                 color: PosAppTheme.textGray,
@@ -168,7 +142,7 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
             ),
             SizedBox(height: responsive.paddingSmall),
             Text(
-              'Add the bags your shop sells or uses, with a buying and selling price.',
+              'Add a bag tier (e.g. Rs 5 bag) with its buying and selling price.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: responsive.bodySmall,
@@ -179,62 +153,57 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
         ),
       );
 
-  Widget _summaryRow(
-    List<Product> bags,
-    String currency,
-    ResponsiveSize responsive,
-  ) {
-    var stockValue = 0.0;
-    var stockUnits = 0.0;
-    var potentialProfit = 0.0;
-    for (final bag in bags) {
-      stockUnits += bag.quantity;
-      stockValue += bag.buyingPrice * bag.quantity;
-      potentialProfit += (bag.sellingPrice - bag.buyingPrice) * bag.quantity;
-    }
+  Widget _summaryRow(String symbol, ResponsiveSize responsive) {
+    final stock = _bags.fold<double>(0, (s, b) => s + b.quantity);
+    final stockValue =
+        _bags.fold<double>(0, (s, b) => s + b.buyingPrice * b.quantity);
     return Wrap(
       spacing: responsive.paddingMedium,
       runSpacing: responsive.paddingSmall,
       children: [
         _summaryChip(
-          '${bags.length}',
-          'Bag type${bags.length == 1 ? '' : 's'}',
+          '${_bags.length}',
+          'Bag tiers',
           Icons.category,
           PosAppTheme.accentBlue,
           responsive,
         ),
         _summaryChip(
-          fmtQty(stockUnits),
+          fmtQty(stock),
           'Bags in stock',
           Icons.inventory_2,
           PosAppTheme.primaryGreen,
           responsive,
         ),
         _summaryChip(
-          '$currency ${stockValue.toStringAsFixed(2)}',
+          '$symbol ${stockValue.toStringAsFixed(2)}',
           'Stock value (cost)',
           Icons.payments_outlined,
           PosAppTheme.warningOrange,
           responsive,
         ),
         _summaryChip(
-          '$currency ${potentialProfit.toStringAsFixed(2)}',
-          'Profit if all sold',
-          Icons.trending_up,
+          '${fmtQty(_s('soldQty'))} · $symbol '
+          '${_s('soldValue').toStringAsFixed(2)}',
+          'Sold today (value)',
+          Icons.sell_outlined,
           PosAppTheme.successGreen,
+          responsive,
+        ),
+        _summaryChip(
+          '${fmtQty(_s('usedQty'))} · $symbol '
+          '${_s('usedCost').toStringAsFixed(2)}',
+          'Shop use today (cost)',
+          Icons.storefront_outlined,
+          PosAppTheme.dangerRed,
           responsive,
         ),
       ],
     );
   }
 
-  Widget _summaryChip(
-    String value,
-    String label,
-    IconData icon,
-    Color color,
-    ResponsiveSize responsive,
-  ) =>
+  Widget _summaryChip(String value, String label, IconData icon, Color color,
+          ResponsiveSize responsive) =>
       GroceryCard(
         child: Padding(
           padding: EdgeInsets.symmetric(
@@ -250,21 +219,17 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    value,
-                    style: TextStyle(
-                      fontSize: responsive.bodyLarge,
-                      fontWeight: FontWeight.bold,
-                      color: color,
-                    ),
-                  ),
-                  Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: responsive.bodyTiny,
-                      color: PosAppTheme.textGray,
-                    ),
-                  ),
+                  Text(value,
+                      style: TextStyle(
+                        fontSize: responsive.bodyLarge,
+                        fontWeight: FontWeight.bold,
+                        color: color,
+                      )),
+                  Text(label,
+                      style: TextStyle(
+                        fontSize: responsive.bodyTiny,
+                        color: PosAppTheme.textGray,
+                      )),
                 ],
               ),
             ],
@@ -272,7 +237,7 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
         ),
       );
 
-  Widget _bagTile(Product bag, String currency, ResponsiveSize responsive) {
+  Widget _bagTile(ShoppingBag bag, String symbol, ResponsiveSize responsive) {
     final out = bag.quantity <= 0;
     return GroceryCard(
       child: Padding(
@@ -286,27 +251,26 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
                 color: PosAppTheme.lightGreen,
                 borderRadius: BorderRadius.circular(responsive.radiusSmall),
               ),
-              child: const Icon(Icons.shopping_bag, color: PosAppTheme.primaryGreen),
+              child: const Icon(Icons.shopping_bag,
+                  color: PosAppTheme.primaryGreen),
             ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    bag.name,
-                    style: TextStyle(
-                      fontSize: responsive.bodyLarge,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  Text(bag.label,
+                      style: TextStyle(
+                        fontSize: responsive.bodyLarge,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
                   const SizedBox(height: 2),
                   Text(
-                    'Buy $currency ${bag.buyingPrice.toStringAsFixed(2)}  •  '
-                    'Sell $currency ${bag.sellingPrice.toStringAsFixed(2)}  •  '
-                    'Profit $currency ${bag.profit.toStringAsFixed(2)}',
+                    'Buy $symbol ${bag.buyingPrice.toStringAsFixed(2)}  ·  '
+                    'Sell $symbol ${bag.price.toStringAsFixed(2)}  ·  '
+                    'Profit $symbol ${bag.profitPerBag.toStringAsFixed(2)}/bag',
                     style: TextStyle(
                       fontSize: responsive.bodyTiny,
                       color: PosAppTheme.textGray,
@@ -318,27 +282,59 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
                     style: TextStyle(
                       fontSize: responsive.bodySmall,
                       fontWeight: FontWeight.bold,
-                      color: out ? PosAppTheme.dangerRed : PosAppTheme.primaryGreen,
+                      color: out
+                          ? PosAppTheme.dangerRed
+                          : PosAppTheme.primaryGreen,
                     ),
                   ),
                 ],
               ),
             ),
             IconButton(
-              tooltip: 'Shop use (take from stock)',
-              icon: Icon(
-                Icons.remove_circle_outline,
-                color: out ? Colors.grey : PosAppTheme.warningOrange,
+              tooltip: 'Restock',
+              icon: const Icon(Icons.add_circle_outline,
+                  color: PosAppTheme.successGreen),
+              onPressed: () => _showQtyDialog(
+                bag,
+                title: 'Restock — ${bag.label}',
+                confirmLabel: 'Add to stock',
+                onConfirm: (qty) async {
+                  final ok = await _db.recordShoppingBagMovement(
+                    bagId: bag.id,
+                    quantity: qty,
+                    type: 'restock',
+                  );
+                  return ok;
+                },
               ),
-              onPressed: out ? null : () => _showShopUseDialog(bag),
             ),
             IconButton(
-              tooltip: 'Edit',
+              tooltip: 'Shop use (take from stock)',
+              icon: Icon(Icons.remove_circle_outline,
+                  color: out ? Colors.grey : PosAppTheme.warningOrange),
+              onPressed: out
+                  ? null
+                  : () => _showQtyDialog(
+                        bag,
+                        title: 'Shop use — ${bag.label}',
+                        confirmLabel: 'Take from stock',
+                        onConfirm: (qty) async {
+                          final ok = await _db.recordShoppingBagMovement(
+                            bagId: bag.id,
+                            quantity: -qty,
+                            type: 'shop_use',
+                          );
+                          return ok;
+                        },
+                      ),
+            ),
+            IconButton(
+              tooltip: 'Edit tier',
               icon: const Icon(Icons.edit, color: PosAppTheme.accentBlue),
-              onPressed: () => _showBagDialog(existing: bag),
+              onPressed: () => _showBagDialog(bag),
             ),
             IconButton(
-              tooltip: 'Delete',
+              tooltip: 'Delete tier',
               icon: const Icon(Icons.delete, color: PosAppTheme.dangerRed),
               onPressed: () => _confirmDelete(bag),
             ),
@@ -348,148 +344,100 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
     );
   }
 
-  // ── Add / edit ────────────────────────────────────────────────────────────
+  // ── Add / edit tier ───────────────────────────────────────────────────────
 
-  void _showAddBagDialog() => _showBagDialog();
-
-  void _showBagDialog({Product? existing}) {
+  void _showBagDialog([ShoppingBag? existing]) {
     final isEdit = existing != null;
-    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final labelCtrl = TextEditingController(text: existing?.label ?? '');
+    final priceCtrl = TextEditingController(
+        text: existing != null ? existing.price.toString() : '');
     final costCtrl = TextEditingController(
-      text: existing != null ? existing.buyingPrice.toString() : '',
-    );
-    final sellCtrl = TextEditingController(
-      text: existing != null ? existing.sellingPrice.toString() : '',
-    );
-    final qtyCtrl = TextEditingController(
-      text: existing != null ? fmtQty(existing.quantity) : '0',
-    );
+        text: existing != null ? existing.buyingPrice.toString() : '');
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(isEdit ? 'Edit Shopping Bag' : 'Add Shopping Bag'),
+      builder: (dialogContext) => AlertDialog(
+        title: Text(isEdit ? 'Edit Bag Tier' : 'Add Bag Tier'),
         contentPadding: const EdgeInsets.all(20),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               GroceryTextField(
-                label: 'Bag name * (e.g. Small bag, Big bag, Bundle of 100)',
-                controller: nameCtrl,
+                label: 'Label * (e.g. Rs 5 bag)',
+                controller: labelCtrl,
               ),
               const SizedBox(height: 12),
               Row(
                 children: [
                   Expanded(
                     child: GroceryTextField(
-                      label: 'Buying price *',
-                      controller: costCtrl,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
+                      label: 'Selling price *',
+                      controller: priceCtrl,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: GroceryTextField(
-                      label: 'Selling price *',
-                      controller: sellCtrl,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
+                      label: 'Buying / cost price *',
+                      controller: costCtrl,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
                     ),
                   ),
                 ],
-              ),
-              const SizedBox(height: 12),
-              GroceryTextField(
-                label: isEdit ? 'Stock in hand *' : 'Opening stock *',
-                controller: qtyCtrl,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
               ),
             ],
           ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: const Text('Cancel'),
           ),
           ElevatedButton(
             onPressed: () async {
-              final name = nameCtrl.text.trim();
+              final label = labelCtrl.text.trim();
+              final price = double.tryParse(priceCtrl.text.trim());
               final cost = double.tryParse(costCtrl.text.trim());
-              final sell = double.tryParse(sellCtrl.text.trim());
-              final qty = double.tryParse(qtyCtrl.text.trim());
-              if (name.isEmpty || cost == null || sell == null || qty == null) {
+              if (label.isEmpty || price == null || cost == null || price < 0 || cost < 0) {
                 showTopSnackBar(
                   context,
                   const SnackBar(
-                    content: Text('Please fill all fields with valid numbers'),
+                    content: Text('Enter a label and valid prices'),
                     backgroundColor: PosAppTheme.dangerRed,
                   ),
                 );
                 return;
               }
-              if (cost < 0 || sell < 0 || qty < 0) {
-                showTopSnackBar(
-                  context,
-                  const SnackBar(
-                    content: Text('Values cannot be negative'),
-                    backgroundColor: PosAppTheme.dangerRed,
-                  ),
+              if (isEdit) {
+                final bag = ShoppingBag(
+                  id: existing.id,
+                  label: label,
+                  price: price,
+                  buyingPrice: cost,
+                  quantity: existing.quantity,
                 );
-                return;
+                await _db.upsertShoppingBag(bag);
+              } else {
+                await _db.upsertShoppingBag(ShoppingBag(
+                  label: label,
+                  price: price,
+                  buyingPrice: cost,
+                ));
               }
-
-              final productProvider = context.read<ProductProvider>();
-              try {
-                if (isEdit) {
-                  await productProvider.updateProduct(
-                    existing.copyWith(
-                      name: name,
-                      buyingPrice: cost,
-                      sellingPrice: sell,
-                      quantity: qty,
-                      categoryId: _bagCategoryId,
-                    ),
-                  );
-                } else {
-                  final barcode = await _uniqueBagBarcode(name);
-                  await productProvider.addProduct(
-                    Product(
-                      name: name,
-                      barcode: barcode,
-                      categoryId: _bagCategoryId,
-                      buyingPrice: cost,
-                      sellingPrice: sell,
-                      quantity: qty,
-                    ),
-                  );
-                }
-                if (!mounted) return;
-                Navigator.pop(context);
-                showTopSnackBar(
-                  context,
-                  SnackBar(
-                    content: Text(
-                      isEdit ? 'Bag updated' : 'Bag added successfully',
-                    ),
-                    backgroundColor: PosAppTheme.successGreen,
-                  ),
-                );
-              } catch (e) {
-                if (!mounted) return;
-                showTopSnackBar(
-                  context,
-                  SnackBar(
-                    content: Text('Error: $e'),
-                    backgroundColor: PosAppTheme.dangerRed,
-                  ),
-                );
-              }
+              if (!mounted) return;
+              Navigator.pop(dialogContext);
+              await _load();
+              showTopSnackBar(
+                context,
+                SnackBar(
+                  content: Text(isEdit ? 'Bag tier updated' : 'Bag tier added'),
+                  backgroundColor: PosAppTheme.successGreen,
+                ),
+              );
             },
             child: Text(isEdit ? 'Update' : 'Add'),
           ),
@@ -498,62 +446,48 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
     );
   }
 
-  /// Bags are not usually scanned, but every product still needs a unique
-  /// barcode. Derive one from the name and fall back to a timestamp suffix.
-  Future<String> _uniqueBagBarcode(String name) async {
-    final base = name
-        .toUpperCase()
-        .replaceAll(RegExp(r'[^A-Z0-9]+'), '-')
-        .replaceAll(RegExp(r'^-+|-+$'), '');
-    final prefix = base.isEmpty ? 'BAG' : 'BAG-$base';
-    final provider = context.read<ProductProvider>();
-    var candidate = prefix;
-    var attempt = 1;
-    while (await provider.getProductByBarcode(candidate) != null) {
-      candidate = '$prefix-${DateTime.now().millisecondsSinceEpoch % 100000}-$attempt';
-      attempt++;
-      if (attempt > 5) break;
-    }
-    return candidate;
-  }
+  // ── Restock / shop use ────────────────────────────────────────────────────
 
-  // ── Shop use ──────────────────────────────────────────────────────────────
-
-  void _showShopUseDialog(Product bag) {
+  void _showQtyDialog(
+    ShoppingBag bag, {
+    required String title,
+    required String confirmLabel,
+    required Future<bool> Function(double qty) onConfirm,
+  }) {
     final qtyCtrl = TextEditingController(text: '1');
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Shop use — ${bag.name}'),
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Bags taken out of stock for the shop\'s own use. '
-              'This reduces the bag stock and is counted as a cost in '
-              'profit & loss.',
-              style: TextStyle(fontSize: 12, color: Colors.grey[700]),
-            ),
-            const SizedBox(height: 12),
             TextField(
               controller: qtyCtrl,
               autofocus: true,
               keyboardType:
                   const TextInputType.numberWithOptions(decimal: true),
               decoration: const InputDecoration(
-                labelText: 'Quantity used',
+                labelText: 'Quantity (bags)',
                 border: OutlineInputBorder(),
               ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'In stock: ${fmtQty(bag.quantity)}  ·  '
+              'Sell Rs ${bag.price.toStringAsFixed(2)}/bag · '
+              'cost Rs ${bag.buyingPrice.toStringAsFixed(2)}/bag',
+              style: const TextStyle(fontSize: 11, color: PosAppTheme.textGray),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: const Text('Cancel'),
           ),
-          ElevatedButton.icon(
+          ElevatedButton(
             onPressed: () async {
               final qty = double.tryParse(qtyCtrl.text.trim());
               if (qty == null || qty <= 0) {
@@ -566,57 +500,49 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
                 );
                 return;
               }
-              final user = context.read<AuthProvider>().currentUser;
-              final recorded = await DatabaseService().recordWastage(
-                productId: bag.id,
-                productName: bag.name,
-                quantity: qty,
-                reason: 'Shop use',
-                recordedBy: user?.fullName ?? '',
-              );
-              if (!mounted) return;
-              Navigator.pop(context);
-              if (recorded == null) {
+              final ok = await onConfirm(qty);
+              if (!context.mounted) return;
+              Navigator.pop(dialogContext);
+              await _load();
+              if (!ok) {
                 showTopSnackBar(
                   context,
                   const SnackBar(
-                    content: Text('Could not record shop use'),
+                    content: Text('Not enough bags in stock'),
                     backgroundColor: PosAppTheme.dangerRed,
                   ),
                 );
                 return;
               }
-              await context.read<ProductProvider>().loadProducts();
-              if (!mounted) return;
               showTopSnackBar(
                 context,
                 SnackBar(
-                  content: Text('${fmtQty(qty)} × ${bag.name} recorded as shop use'),
+                  content: Text('${fmtQty(qty)} × ${bag.label} done'),
                   backgroundColor: PosAppTheme.successGreen,
                 ),
               );
             },
-            icon: const Icon(Icons.check),
-            label: const Text('Record'),
+            child: Text(confirmLabel),
           ),
         ],
       ),
     );
   }
 
-  Future<void> _confirmDelete(Product bag) async {
+  Future<void> _confirmDelete(ShoppingBag bag) async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Bag'),
-        content: Text('Delete "${bag.name}"? Its sales history stays in reports.'),
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete Bag Tier'),
+        content: Text('Delete "${bag.label}"? Sold/used history stays in the '
+            'daily reports.'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.pop(dialogContext, false),
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
+            onPressed: () => Navigator.pop(dialogContext, true),
             style: ElevatedButton.styleFrom(
               backgroundColor: PosAppTheme.dangerRed,
             ),
@@ -626,12 +552,13 @@ class _ShoppingBagScreenState extends State<ShoppingBagScreen> {
       ),
     );
     if (confirmed ?? false) {
-      await context.read<ProductProvider>().deleteProduct(bag.id);
+      await _db.deleteShoppingBag(bag.id);
       if (!mounted) return;
+      await _load();
       showTopSnackBar(
         context,
         const SnackBar(
-          content: Text('Bag deleted'),
+          content: Text('Bag tier deleted'),
           backgroundColor: PosAppTheme.successGreen,
         ),
       );

@@ -21,6 +21,7 @@ import '../models/recipe.dart';
 import '../models/refund_return.dart';
 import '../models/reload_card.dart';
 import '../models/sale.dart';
+import '../models/shopping_bag.dart';
 import '../models/shop_settings.dart';
 import '../models/supplier.dart';
 import '../models/supplier_payment.dart';
@@ -851,6 +852,53 @@ class DatabaseService {
       ''');
     }
 
+    // ============ SHOPPING BAGS (separate stock, own section) ============
+    final shoppingBagsTable = await _tableExists(db, 'shopping_bags');
+    if (!shoppingBagsTable) {
+      await db.execute('''
+        CREATE TABLE shopping_bags (
+          id TEXT PRIMARY KEY,
+          label TEXT NOT NULL,
+          price REAL NOT NULL,
+          buyingPrice REAL NOT NULL,
+          quantity REAL NOT NULL DEFAULT 0,
+          createdAt TEXT NOT NULL,
+          updatedAt TEXT NOT NULL
+        )
+      ''');
+    }
+
+    final shoppingBagUsageTable = await _tableExists(db, 'shopping_bag_usage');
+    if (!shoppingBagUsageTable) {
+      await db.execute('''
+        CREATE TABLE shopping_bag_usage (
+          id TEXT PRIMARY KEY,
+          bagId TEXT NOT NULL,
+          bagLabel TEXT NOT NULL DEFAULT '',
+          bagPrice REAL NOT NULL DEFAULT 0,
+          bagCost REAL NOT NULL DEFAULT 0,
+          quantity REAL NOT NULL,
+          value REAL NOT NULL DEFAULT 0,
+          type TEXT NOT NULL,
+          saleId TEXT NOT NULL DEFAULT '',
+          createdAt TEXT NOT NULL
+        )
+      ''');
+    } else {
+      try {
+        final columns = await db.rawQuery('PRAGMA table_info(shopping_bag_usage)');
+        final names = columns.map((col) => col['name'] as String).toSet();
+        if (!names.contains('value')) {
+          await db.execute(
+            'ALTER TABLE shopping_bag_usage ADD COLUMN value REAL NOT NULL DEFAULT 0',
+          );
+        }
+      } catch (e) {
+        developer.log('shopping_bag_usage migration error: $e',
+            name: 'DatabaseService');
+      }
+    }
+
     // Shop Settings Table
     final settingsTableExists = await _tableExists(db, 'shop_settings');
     if (!settingsTableExists) {
@@ -1195,37 +1243,6 @@ class DatabaseService {
     final db = await database;
     await db.delete('categories', where: 'id = ?', whereArgs: [id]);
     BackupService.notifyTransaction('category');
-  }
-
-  /// Fixed name of the reserved category that holds shopping bags. Bags are
-  /// ordinary products inside this category so they get the same stock, FIFO
-  /// costing, bill printing and LAN sync as everything else — but the shop also
-  /// gets a dedicated screen to manage them and record "shop use".
-  static const String shoppingBagCategoryName = 'Shopping Bags';
-
-  /// Returns the reserved "Shopping Bags" category, creating it on first use.
-  Future<Category> ensureShoppingBagCategory() async {
-    final existing = await getCategoryByName(shoppingBagCategoryName);
-    if (existing != null) return existing;
-    final category = Category(
-      name: shoppingBagCategoryName,
-      description: 'Carrier / shopping bags sold to customers or used in the shop',
-    );
-    await insertCategory(category);
-    return category;
-  }
-
-  /// Every product that belongs to the reserved shopping-bag category.
-  Future<List<Product>> getShoppingBagProducts() async {
-    final category = await getCategoryByName(shoppingBagCategoryName);
-    if (category == null) return const [];
-    final db = await database;
-    final maps = await db.query(
-      'products',
-      where: 'categoryId = ?',
-      whereArgs: [category.id],
-    );
-    return maps.map(Product.fromMap).toList();
   }
 
   // ============== PRODUCTS ==============
@@ -1984,6 +2001,42 @@ class DatabaseService {
 
       final now = DateTime.now().toIso8601String();
       for (final item in items) {
+        if (item.isBag) {
+          // Shopping-bag line: no grocery product or FIFO batch moves. The
+          // bag's own stock is adjusted and the movement logged in the SAME
+          // transaction as the bill, so the bag count can never drift from the
+          // sales recorded.
+          final bagMaps = await txn.query(
+            'shopping_bags',
+            where: 'id = ?',
+            whereArgs: [item.bagId],
+            limit: 1,
+          );
+          if (bagMaps.isNotEmpty) {
+            final bag = ShoppingBag.fromMap(bagMaps.first);
+            final next =
+                (bag.quantity - item.stockQuantity).clamp(0.0, double.infinity);
+            await txn.update(
+              'shopping_bags',
+              {'quantity': next, 'updatedAt': now},
+              where: 'id = ?',
+              whereArgs: [item.bagId],
+            );
+            await txn.insert(
+              'shopping_bag_usage',
+              ShoppingBagUsage(
+                bagId: bag.id,
+                bagLabel: bag.label,
+                bagPrice: item.bagPrice > 0 ? item.bagPrice : item.unitPrice,
+                bagCost: item.bagCost,
+                quantity: item.stockQuantity,
+                type: 'customer_sell',
+                saleId: sale.id,
+              ).toMap(),
+            );
+          }
+          continue;
+        }
         // Stock is tracked in the product's own unit (boxes). A loose line
         // takes only a fraction of a box, so deduct its stock quantity rather
         // than its piece count.
@@ -2035,6 +2088,178 @@ class DatabaseService {
       }
     });
     BackupService.notifyTransaction('bill');
+  }
+
+  // ============== SHOPPING BAGS (separate stock & usage) ==============
+
+  /// Seeds the standard bag tiers (Rs 3 / Rs 5 / Rs 10 / Rs 20) on first run.
+  /// The shop owner can edit the labels, prices and costs in the Shopping Bags
+  /// section afterwards.
+  Future<List<ShoppingBag>> ensureDefaultShoppingBags() async {
+    final existing = await getShoppingBags();
+    if (existing.isNotEmpty) return existing;
+    const tiers = <(String, double)>[
+      ('Rs 3 bag', 3),
+      ('Rs 5 bag', 5),
+      ('Rs 10 bag', 10),
+      ('Rs 20 bag', 20),
+    ];
+    for (final tier in tiers) {
+      await upsertShoppingBag(ShoppingBag(
+        label: tier.$1,
+        price: tier.$2.toDouble(),
+        buyingPrice: 0,
+      ));
+    }
+    return getShoppingBags();
+  }
+
+  Future<List<ShoppingBag>> getShoppingBags() async {
+    final db = await database;
+    final maps = await db.query('shopping_bags', orderBy: 'price ASC');
+    return maps.map(ShoppingBag.fromMap).toList();
+  }
+
+  Future<ShoppingBag?> getShoppingBagById(String id) async {
+    final db = await database;
+    final maps = await db.query(
+      'shopping_bags',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return ShoppingBag.fromMap(maps.first);
+  }
+
+  /// Adds a bag tier or saves an edit (label, price, cost). Quantity is not
+  /// changed here — use [recordShoppingBagMovement] so every stock change is
+  /// logged for the daily sold / shop-use report.
+  Future<void> upsertShoppingBag(ShoppingBag bag) async {
+    final db = await database;
+    bag.updatedAt = DateTime.now();
+    await db.insert(
+      'shopping_bags',
+      bag.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    BackupService.notifyTransaction('shopping-bag');
+  }
+
+  Future<void> deleteShoppingBag(String id) async {
+    final db = await database;
+    await db.delete('shopping_bags', where: 'id = ?', whereArgs: [id]);
+    BackupService.notifyTransaction('shopping-bag');
+  }
+
+  /// Moves bag stock and logs the movement.
+  ///
+  /// * `quantity > 0` → stock in (`type == 'restock'`)
+  /// * `quantity < 0` → stock out (`type == 'shop_use'`, valued at cost for
+  ///   profit & loss). Customer sells are handled atomically inside
+  ///   [completeSale] with the sale.
+  ///
+  /// Returns false when the bag is missing or the movement would take the
+  /// stock below zero.
+  Future<bool> recordShoppingBagMovement({
+    required String bagId,
+    required double quantity,
+    required String type,
+    String saleId = '',
+  }) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    var ok = false;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'shopping_bags',
+        where: 'id = ?',
+        whereArgs: [bagId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+      final bag = ShoppingBag.fromMap(rows.first);
+      var next = bag.quantity + quantity;
+      if (next < 0) return;
+      next = next.clamp(0.0, double.infinity);
+      await txn.update(
+        'shopping_bags',
+        {'quantity': next, 'updatedAt': now},
+        where: 'id = ?',
+        whereArgs: [bagId],
+      );
+      await txn.insert(
+        'shopping_bag_usage',
+        ShoppingBagUsage(
+          bagId: bag.id,
+          bagLabel: bag.label,
+          bagPrice: bag.price,
+          bagCost: bag.buyingPrice,
+          quantity: quantity.abs(),
+          type: type,
+          saleId: saleId,
+        ).toMap(),
+      );
+      ok = true;
+    });
+    if (ok) BackupService.notifyTransaction('shopping-bag');
+    return ok;
+  }
+
+  /// How bags were used between two dates: sold to customers and used by the
+  /// shop itself — counts, money (value) and cost — plus restocks.
+  Future<Map<String, dynamic>> getShoppingBagSummary(
+    DateTime start,
+    DateTime end,
+  ) async {
+    final db = await database;
+    final maps = await db.query(
+      'shopping_bag_usage',
+      where: 'createdAt >= ? AND createdAt <= ?',
+      whereArgs: [start.toIso8601String(), end.toIso8601String()],
+    );
+
+    var soldQty = 0.0, soldValue = 0.0, soldCost = 0.0;
+    var usedQty = 0.0, usedValue = 0.0, usedCost = 0.0;
+    var restockQty = 0.0;
+    for (final m in maps) {
+      final u = ShoppingBagUsage.fromMap(m);
+      switch (u.type) {
+        case 'customer_sell':
+          soldQty += u.quantity;
+          soldValue += u.value;
+          soldCost += u.cost;
+        case 'shop_use':
+          usedQty += u.quantity;
+          usedValue += u.value;
+          usedCost += u.cost;
+        case 'restock':
+          restockQty += u.quantity;
+      }
+    }
+
+    return {
+      'soldQty': soldQty,
+      'soldValue': soldValue,
+      'soldCost': soldCost,
+      'soldProfit': soldValue - soldCost,
+      'usedQty': usedQty,
+      'usedValue': usedValue,
+      'usedCost': usedCost,
+      'restockQty': restockQty,
+      'sales': maps.length,
+    };
+  }
+
+  /// Recent bag movements (newest first) for the history list.
+  Future<List<ShoppingBagUsage>> getShoppingBagUsageHistory({int limit = 50}) async {
+    final db = await database;
+    final maps = await db.query(
+      'shopping_bag_usage',
+      orderBy: 'createdAt DESC',
+      limit: limit,
+    );
+    return maps.map(ShoppingBagUsage.fromMap).toList();
   }
 
   /// Look up a product by barcode (exact) or, failing that, by exact name.
@@ -2599,11 +2824,15 @@ class DatabaseService {
     var expenses = 0;
     var wastages = 0;
     var reloadCards = 0;
+    var bagUsage = 0;
     await db.transaction((txn) async {
       sales = await txn.delete('sales');
       expenses = await txn.delete('expenses');
       wastages = await txn.delete('wastages');
       reloadCards = await txn.delete('reload_cards');
+      // The daily sold / shop-use bag ledger is part of the reports; the bag
+      // tiers and their stock stay untouched.
+      bagUsage = await txn.delete('shopping_bag_usage');
     });
     await setSyncMeta(_reportsResetKey, DateTime.now().toIso8601String());
     BackupService.notifyTransaction('reset-reports');
@@ -2612,6 +2841,7 @@ class DatabaseService {
       'expenses': expenses,
       'wastages': wastages,
       'reload_cards': reloadCards,
+      'shopping_bag_usage': bagUsage,
     };
   }
 
@@ -2876,6 +3106,9 @@ class DatabaseService {
     final reloadSoldValue = reloadSummary['soldValue'] as double;
     final reloadSoldCount = reloadSummary['count'] as int;
 
+    // ---- Shopping bags (sold vs shop use, separate section) -------------
+    final bagUsageSummary = await getShoppingBagSummary(start, end);
+
     // ---- Expenses ------------------------------------------------------
     final expenseRows = await db.query(
       'expenses',
@@ -2959,7 +3192,8 @@ class DatabaseService {
     final totalLoss = cogs +
         wastageLoss +
         refundLoss +
-        expenseTotal;
+        expenseTotal +
+        ((bagUsageSummary['usedCost'] as num?)?.toDouble() ?? 0);
     // Reload margin is additional income the shop earned, independent of the
     // till's bills, so it is added after the running costs are taken off. A
     // supplier return is money that came back from a supplier (the goods were
@@ -3002,6 +3236,13 @@ class DatabaseService {
       'stockValue': stockValue,
       'stockItems': stockItems,
       'productCount': products.length,
+      'bagSoldQty': bagUsageSummary['soldQty'],
+      'bagSoldValue': bagUsageSummary['soldValue'],
+      'bagSoldCost': bagUsageSummary['soldCost'],
+      'bagUsedQty': bagUsageSummary['usedQty'],
+      'bagUsedValue': bagUsageSummary['usedValue'],
+      'bagUsedCost': bagUsageSummary['usedCost'],
+      'bagRestockQty': bagUsageSummary['restockQty'],
       'netProfit': netProfit,
       'isLoss': netProfit < 0,
     };
@@ -3332,6 +3573,8 @@ class DatabaseService {
     await db.delete('expenses');
     await db.delete('wastages');
     await db.delete('supplier_returns');
+    await db.delete('shopping_bag_usage');
+    await db.delete('shopping_bags');
   }
 
   Future<void> closeDatabase() async {
@@ -4114,6 +4357,11 @@ const List<_MirrorTable> _mirrorTables = [
     'product_batches',
     'COALESCE(updatedAt, receivedDate, createdAt)',
   ),
+  // Shopping bags: the tier rows (including their own stock — bag stock moves
+  // rarely and from one counter, so each movement ships the updated row) and
+  // the sold / shop-use / restock usage log that drives the dashboard numbers.
+  _MirrorTable('shopping_bags', 'COALESCE(updatedAt, createdAt)'),
+  _MirrorTable('shopping_bag_usage', 'createdAt', sumColumn: 'value'),
 ];
 
 /// Look up a mirror descriptor by table name (used to reach a child table's

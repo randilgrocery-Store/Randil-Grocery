@@ -1466,19 +1466,23 @@ class _PosScreenState extends State<PosScreen> {
   /// price, prints on the bill, reduces bag stock and counts towards
   /// profit & loss exactly like any other item.
   Future<void> _showBagDialog() async {
-    final bags = await DatabaseService().getShoppingBagProducts();
+    final db = DatabaseService();
+    var bags = await db.getShoppingBags();
+    if (bags.isEmpty) {
+      bags = await db.ensureDefaultShoppingBags();
+    }
     if (!mounted) return;
 
     if (bags.isEmpty) {
       _showSnackBar(
-        'No shopping bags — add one under Inventory → Shopping Bags',
+        'No shopping bags — add them under Shopping Bags in the menu',
       );
       return;
     }
 
-    String? selectedId = bags.first.id;
+    var selectedId = bags.first.id;
+    var qty = 1.0;
     final symbol = context.read<SettingsProvider>().settings.currencySymbol;
-    final qtyCtrl = TextEditingController(text: '1');
 
     await showDialog<void>(
       context: context,
@@ -1497,76 +1501,110 @@ class _PosScreenState extends State<PosScreen> {
               children: [
                 Icon(Icons.shopping_bag, color: PosAppTheme.primaryGreen),
                 SizedBox(width: 8),
-                Text('Add Shopping Bag'),
+                Text('Shopping Bag — Add to Bill'),
               ],
             ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                DropdownButtonFormField<String>(
-                  initialValue: selectedId,
-                  decoration: const InputDecoration(
-                    labelText: 'Bag type',
-                    border: OutlineInputBorder(),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Pick a bag, set how many the customer needs '
+                    '(bundles allowed), then Add.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey.shade600,
+                    ),
                   ),
-                  items: bags
-                      .map(
-                        (b) => DropdownMenuItem(
-                          value: b.id,
+                  const SizedBox(height: 12),
+                  for (final bag in bags)
+                    RadioListTile<String>(
+                      value: bag.id,
+                      groupValue: selectedId,
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        '${bag.label}  ·  $symbol '
+                        '${bag.price.toStringAsFixed(2)}',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      subtitle: Text(
+                        bag.quantity > 0
+                            ? '${fmtQty(bag.quantity)} in stock'
+                            : 'Out of stock',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: bag.quantity > 0
+                              ? PosAppTheme.primaryGreen
+                              : PosAppTheme.dangerRed,
+                        ),
+                      ),
+                      onChanged: bag.quantity > 0
+                          ? (value) {
+                              if (value != null) {
+                                setDialogState(() => selectedId = value);
+                              }
+                            }
+                          : null,
+                    ),
+                  if (!out) ...[
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton.outlined(
+                          onPressed: qty > 1
+                              ? () => setDialogState(() => qty -= 1)
+                              : null,
+                          icon: const Icon(Icons.remove, size: 18),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
                           child: Text(
-                            '${b.name}  ·  $symbol '
-                            '${b.sellingPrice.toStringAsFixed(2)}  ·  '
-                            'stock ${fmtQty(b.quantity)}',
-                            overflow: TextOverflow.ellipsis,
+                            fmtQty(qty),
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
                         ),
-                      )
-                      .toList(),
-                  onChanged: (value) {
-                    if (value != null) {
-                      setDialogState(() => selectedId = value);
-                    }
-                  },
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: qtyCtrl,
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(
-                    labelText: 'Bundles',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  out
-                      ? 'This bag is out of stock'
-                      : '$symbol ${selected.sellingPrice.toStringAsFixed(2)} per bundle',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: out
-                        ? PosAppTheme.dangerRed
-                        : PosAppTheme.textGray,
-                  ),
-                ),
-              ],
+                        IconButton.outlined(
+                          onPressed: qty < selected.quantity
+                              ? () => setDialogState(() => qty += 1)
+                              : null,
+                          icon: const Icon(Icons.add, size: 18),
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          '$symbol ${(selected.price * qty).toStringAsFixed(2)}',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                            color: PosAppTheme.primaryGreen,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
             ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('Cancel'),
+                child: const Text('Not needed'),
               ),
               ElevatedButton.icon(
                 onPressed: out
                     ? null
                     : () async {
-                        final qty = double.tryParse(qtyCtrl.text.trim());
-                        if (qty == null || qty <= 0) return;
-                        await context.read<SalesProvider>().addToCart(
-                              bags.firstWhere((b) => b.id == selectedId),
-                              quantity: qty,
-                            );
+                        await context
+                            .read<SalesProvider>()
+                            .addBagToCart(selected, qty);
                         await SoundService.playBeep();
                         if (mounted) Navigator.pop(dialogContext);
                       },

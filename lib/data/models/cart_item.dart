@@ -10,11 +10,24 @@ class CartItem { // discount is in percentage (0-100)
     double? unitPrice,
     this.loose = false,
     this.piecesPerBox = 1,
+    this.isBag = false,
+    this.bagId = '',
+    this.bagPrice = 0,
+    this.bagCost = 0,
   }) : unitPrice = unitPrice ?? product.sellingPrice;
   final String id;
   final Product product;
   double quantity;
   double discount;
+
+  /// True for a shopping-bag line added from the POS "Bag" picker. Bags are
+  /// not grocery products: the line carries a stub product only so the bill,
+  /// reports and mirror behave like any other line, while the bag's own stock
+  /// lives in the separate `shopping_bags` table (see completeSale).
+  final bool isBag;
+  final String bagId;
+  final double bagPrice;
+  final double bagCost;
 
   /// The price actually being charged for this line, resolved from the
   /// oldest (FIFO) stock batch(es) for the product. Falls back to the product's
@@ -54,6 +67,10 @@ class CartItem { // discount is in percentage (0-100)
     double? unitPrice,
     bool? loose,
     int? piecesPerBox,
+    bool? isBag,
+    String? bagId,
+    double? bagPrice,
+    double? bagCost,
   }) => CartItem(
       id: id ?? this.id,
       product: product ?? this.product,
@@ -62,6 +79,10 @@ class CartItem { // discount is in percentage (0-100)
       unitPrice: unitPrice ?? this.unitPrice,
       loose: loose ?? this.loose,
       piecesPerBox: piecesPerBox ?? this.piecesPerBox,
+      isBag: isBag ?? this.isBag,
+      bagId: bagId ?? this.bagId,
+      bagPrice: bagPrice ?? this.bagPrice,
+      bagCost: bagCost ?? this.bagCost,
     );
 
   @override

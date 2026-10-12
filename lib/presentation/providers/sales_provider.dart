@@ -7,6 +7,7 @@ import '../../data/models/cart_item.dart';
 import '../../data/models/held_bill.dart';
 import '../../data/models/product.dart';
 import '../../data/models/sale.dart';
+import '../../data/models/shopping_bag.dart';
 import '../../data/services/network_sync.dart';
 import '../../data/services/stock_sync.dart';
 import '../../data/services/supabase_sync_service.dart';
@@ -104,6 +105,55 @@ class SalesProvider extends ChangeNotifier {
       }
     }
 
+    notifyListeners();
+  }
+
+  /// Adds a shopping-bag line at the bag's set price (Rs 3 / 5 / 10 / 20...).
+  ///
+  /// Bags are not grocery products: the line carries a lightweight stub product
+  /// purely so the cart, bill, reports and LAN mirror treat it like any other
+  /// line, while the bag's own stock / usage is handled by the
+  /// `shopping_bags` / `shopping_bag_usage` tables (see
+  /// `DatabaseService.completeSale`). The price charged is always the bag's
+  /// price [bag.price], never a batch/FIFO price.
+  Future<void> addBagToCart(ShoppingBag bag, double quantity) async {
+    if (bag.quantity <= 0 || quantity <= 0) return;
+    final lineId = 'bag:${bag.id}';
+
+    final index = _cartItems.indexWhere((i) => i.id == lineId);
+    if (index >= 0) {
+      final updated = _cartItems[index];
+      final maxAddable =
+          (bag.quantity - updated.quantity).clamp(0.0, double.infinity);
+      if (maxAddable <= 0) return;
+      final add = quantity.clamp(0.0, maxAddable);
+      if (add <= 0) return;
+      updated.quantity += add;
+      notifyListeners();
+      return;
+    }
+
+    final add = quantity.clamp(0.0, bag.quantity);
+    if (add <= 0) return;
+
+    final stub = Product(
+      name: bag.label,
+      barcode: 'BAG-${bag.id}',
+      categoryId: '',
+      buyingPrice: bag.buyingPrice,
+      sellingPrice: bag.price,
+      quantity: bag.quantity,
+    );
+    _cartItems.add(CartItem(
+      id: lineId,
+      product: stub,
+      quantity: add,
+      unitPrice: bag.price,
+      isBag: true,
+      bagId: bag.id,
+      bagPrice: bag.price,
+      bagCost: bag.buyingPrice,
+    ));
     notifyListeners();
   }
 
@@ -246,6 +296,22 @@ class SalesProvider extends ChangeNotifier {
       // batch prices and costs.
       final saleItems = <SaleItem>[];
       for (final item in _cartItems) {
+        if (item.isBag) {
+          // Shopping-bag line: charged at the bag price, costed at the bag's
+          // buying price. No FIFO plan - the bag owns its own stock table.
+          saleItems.add(SaleItem(
+            productId: 'bag:${item.bagId}',
+            productName: item.product.name,
+            price: item.unitPrice,
+            quantity: item.quantity,
+            discount: item.discount,
+            costPrice: item.bagCost,
+            batchNumber: '',
+            barcode: item.product.barcode,
+            piecesPerBox: 1,
+          ));
+          continue;
+        }
         final plan =
             await _dbService.getFifoPlan(item.product, item.stockQuantity);
         // FIFO gives the cost of a whole box; a loose line records the cost of
