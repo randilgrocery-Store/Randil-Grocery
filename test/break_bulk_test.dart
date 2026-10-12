@@ -42,7 +42,9 @@ void main() {
       );
 
   Future<void> seed({double quantity = 3}) async {
-    await db.insert('products', boxProduct(quantity: quantity).toMap());
+    // Stock lives in batches: start the product total at zero and let the
+    // batch receipt bring it to `quantity` (the same rule GRN follows).
+    await db.insert('products', boxProduct(quantity: 0).toMap());
     await DatabaseService().insertProductBatch(
       ProductBatch(
         productId: 'cig',

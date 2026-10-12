@@ -3825,11 +3825,44 @@ class DatabaseService {
     final db = await database;
     final now = DateTime.now().toIso8601String();
     final map = batch.toMap()..['updatedAt'] = now;
-    await db.insert(
-      'product_batches',
-      map,
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await db.transaction((txn) async {
+      // A lot can only exist once per product (UNIQUE(productId, batchNumber)).
+      // Re-entering the same number is an edit of the existing lot, so adjust
+      // the product total by the difference instead of adding it twice.
+      final existingRows = await txn.query(
+        'product_batches',
+        where: 'productId = ? AND batchNumber = ?',
+        whereArgs: [batch.productId, batch.batchNumber],
+      );
+      if (existingRows.isNotEmpty) {
+        final old = ProductBatch.fromMap(existingRows.first);
+        final delta = batch.quantity - old.quantity;
+        map['id'] = old.id;
+        await txn.update(
+          'product_batches',
+          map,
+          where: 'id = ?',
+          whereArgs: [old.id],
+        );
+        if (delta != 0) {
+          await _addToProductTotal(
+              txn, batch.productId, delta, 'Batch ${batch.batchNumber} edited');
+        }
+        return;
+      }
+      await txn.insert(
+        'product_batches',
+        map,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      // A received lot is stock that just entered the shop: add it to the
+      // product total too, otherwise the batch grows thin while the product's
+      // on-hand stays unchanged and the two fall out of step.
+      if (batch.quantity > 0) {
+        await _addToProductTotal(txn, batch.productId, batch.quantity,
+            'Batch ${batch.batchNumber} added');
+      }
+    });
     BackupService.notifyTransaction('batch');
   }
 
@@ -3916,13 +3949,62 @@ class DatabaseService {
     final db = await database;
     final now = DateTime.now().toIso8601String();
     final map = batch.toMap()..['updatedAt'] = now;
-    await db.update(
-      'product_batches',
-      map,
-      where: 'id = ?',
-      whereArgs: [batch.id],
-    );
+    await db.transaction((txn) async {
+      final oldRows = await txn.query(
+        'product_batches',
+        where: 'id = ?',
+        whereArgs: [batch.id],
+      );
+      await txn.update(
+        'product_batches',
+        map,
+        where: 'id = ?',
+        whereArgs: [batch.id],
+      );
+      // A quantity edit moves the product total by the difference so batch
+      // stock and on-hand stock can never disagree.
+      if (oldRows.isNotEmpty) {
+        final old = ProductBatch.fromMap(oldRows.first);
+        final delta = batch.quantity - old.quantity;
+        if (delta != 0) {
+          await _addToProductTotal(
+              txn, batch.productId, delta, 'Batch ${batch.batchNumber} edited');
+        }
+      }
+    });
     BackupService.notifyTransaction('batch');
+  }
+
+  /// Adds [delta] units to a product's on-hand total inside [txn] and logs the
+  /// change in stock history (used by batch add/edit so the batch sum always
+  /// matches the product total).
+  Future<void> _addToProductTotal(
+    DatabaseExecutor txn,
+    String productId,
+    double delta,
+    String reason,
+  ) async {
+    final rows = await txn.query(
+      'products',
+      where: 'id = ?',
+      whereArgs: [productId],
+    );
+    if (rows.isEmpty) return;
+    final product = Product.fromMap(rows.first);
+    final newQty = (product.quantity + delta).clamp(0.0, double.infinity);
+    await txn.update(
+      'products',
+      {'quantity': newQty, 'updatedAt': DateTime.now().toIso8601String()},
+      where: 'id = ?',
+      whereArgs: [product.id],
+    );
+    await txn.insert('stock_history', {
+      'productId': product.id,
+      'productName': product.name,
+      'quantityChanged': delta,
+      'reason': reason,
+      'createdAt': DateTime.now().toIso8601String(),
+    });
   }
 
   /// Adds [delta] units to a batch's remaining quantity (used to put stock
