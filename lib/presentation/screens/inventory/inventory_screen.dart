@@ -446,6 +446,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
               child: ProductImage(
                 path: product.imagePath,
                 fit: BoxFit.cover,
+                cacheWidth: 360,
                 placeholderIcon: Icons.image_not_supported_outlined,
                 placeholderColor: Colors.grey[400],
                 placeholderSize: 35,
@@ -671,6 +672,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                           child: ProductImage(
                             path: selectedImagePath,
                             fit: BoxFit.cover,
+                            cacheWidth: 240,
                             placeholderIcon:
                                 Icons.image_not_supported_outlined,
                             placeholderColor: Colors.grey[400],

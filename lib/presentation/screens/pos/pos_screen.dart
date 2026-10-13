@@ -1651,6 +1651,7 @@ class _PosScreenState extends State<PosScreen> {
               child: ProductImage(
                 path: product.imagePath,
                 fit: BoxFit.cover,
+                cacheWidth: 800,
                 placeholderIcon: Icons.image,
                 placeholderColor: PosAppTheme.primaryGreen,
                 placeholderSize: 80,
@@ -1791,6 +1792,7 @@ class _PosScreenState extends State<PosScreen> {
                       path: product.imagePath,
                       fit: BoxFit.cover,
                       width: double.infinity,
+                      cacheWidth: 400,
                       placeholderIcon: Icons.image,
                       placeholderColor:
                           isAvailable ? PosAppTheme.primaryGreen : Colors.grey,
@@ -2071,6 +2073,7 @@ class _PosScreenState extends State<PosScreen> {
                             fit: BoxFit.cover,
                             width: 70,
                             height: 70,
+                            cacheWidth: 140,
                             placeholderIcon:
                                 Icons.image_not_supported_outlined,
                             placeholderColor: Colors.grey[400],

@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -79,20 +80,32 @@ void main(List<String> args) async {
   // Initialize ThemeProvider
   await ThemeProvider().init();
 
-  // Initialize backup system
+  runApp(const RandilGroceryPOS());
+
+  // Everything below is housekeeping the first frame does not need, so it
+  // starts AFTER the UI is up. The launch snapshot (VACUUM INTO) and the cloud
+  // setup get slower as the shop's database grows; awaiting them before runApp
+  // would hold a blank window on screen at every start.
+  unawaited(_initializeBackgroundServices());
+}
+
+/// Starts the backup system and the phone-app cloud sync after launch.
+///
+/// The backup system writes a full database snapshot and may run a scheduled
+/// backup; the cloud sync loads credentials and arms timers. Neither is needed
+/// to show the UI, so both run off the critical startup path and are
+/// best-effort — a failure must never stop the POS from opening.
+Future<void> _initializeBackgroundServices() async {
   try {
     final settings = await DatabaseService().getShopSettings();
-    final backupService = BackupService();
     final dbPath = await DatabaseService().getDatabasePath();
-    await backupService.initializeBackupSystem(dbPath, settings: settings);
+    await BackupService().initializeBackupSystem(dbPath, settings: settings);
   } catch (_) {}
 
   // Cloud sync to the Randil Grocery POS phone app (no-op until configured)
   try {
     await SupabaseSyncService.instance.init();
   } catch (_) {}
-
-  runApp(const RandilGroceryPOS());
 }
 
 class RandilGroceryPOS extends StatelessWidget {

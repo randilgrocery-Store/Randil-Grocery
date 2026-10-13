@@ -1197,6 +1197,107 @@ class DatabaseService {
         )
       ''');
     }
+
+    await _createIndexes(db);
+  }
+
+  /// Creates the indexes that keep reports, history screens and the 2-PC mirror
+  /// fast as the shop's tables grow month after month. Every report filters a
+  /// large table by a date window; without an index each one is a full scan
+  /// that gets slower all year. Foreign-key and status columns used by the
+  /// detail screens and the mirror pull are covered too.
+  ///
+  /// Idempotent (`CREATE INDEX IF NOT EXISTS`), so it runs safely on every open
+  /// and upgrades existing databases in place with no schema-version bump. A
+  /// failure is logged, never fatal — a missing index only costs speed.
+  Future<void> _createIndexes(Database db) async {
+    const statements = [
+      // Bills: date-window reports, history listing, refund lookups.
+      'CREATE INDEX IF NOT EXISTS idx_sales_sale_date ON sales(saleDate)',
+      'CREATE INDEX IF NOT EXISTS idx_sales_cashier ON sales(cashierId)',
+      'CREATE INDEX IF NOT EXISTS idx_sales_customer_phone '
+          'ON sales(customerPhone)',
+      'CREATE INDEX IF NOT EXISTS idx_sales_invoice ON sales(invoiceNumber)',
+      // Stock movement ledger (per product and by time).
+      'CREATE INDEX IF NOT EXISTS idx_stock_history_product '
+          'ON stock_history(productId)',
+      'CREATE INDEX IF NOT EXISTS idx_stock_history_created '
+          'ON stock_history(createdAt)',
+      // Catalog lookups.
+      'CREATE INDEX IF NOT EXISTS idx_products_category ON products(categoryId)',
+      'CREATE INDEX IF NOT EXISTS idx_products_name ON products(name)',
+      'CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name)',
+      'CREATE INDEX IF NOT EXISTS idx_customers_updated ON customers(updatedAt)',
+      'CREATE INDEX IF NOT EXISTS idx_suppliers_updated ON suppliers(updatedAt)',
+      // Batches: FIFO picks by product, the Expiry screen by date.
+      'CREATE INDEX IF NOT EXISTS idx_batches_product '
+          'ON product_batches(productId)',
+      'CREATE INDEX IF NOT EXISTS idx_batches_expiry '
+          'ON product_batches(expiryDate)',
+      'CREATE INDEX IF NOT EXISTS idx_batches_received '
+          'ON product_batches(receivedDate)',
+      'CREATE INDEX IF NOT EXISTS idx_batches_updated '
+          'ON product_batches(updatedAt)',
+      // Goods received.
+      'CREATE INDEX IF NOT EXISTS idx_grn_received '
+          'ON goods_received_notes(receivedDate)',
+      'CREATE INDEX IF NOT EXISTS idx_grn_created '
+          'ON goods_received_notes(createdAt)',
+      // Refunds: the queue filters by status; reports by date.
+      'CREATE INDEX IF NOT EXISTS idx_refunds_status '
+          'ON refund_returns(status)',
+      'CREATE INDEX IF NOT EXISTS idx_refunds_created '
+          'ON refund_returns(createdAt)',
+      'CREATE INDEX IF NOT EXISTS idx_refunds_processed '
+          'ON refund_returns(processedDate)',
+      'CREATE INDEX IF NOT EXISTS idx_refunds_sale '
+          'ON refund_returns(originalSaleId)',
+      // Purchase orders.
+      'CREATE INDEX IF NOT EXISTS idx_po_order_date '
+          'ON purchase_orders(orderDate)',
+      'CREATE INDEX IF NOT EXISTS idx_po_created '
+          'ON purchase_orders(createdAt)',
+      'CREATE INDEX IF NOT EXISTS idx_po_status ON purchase_orders(status)',
+      // Expenses, wastage, supplier money.
+      'CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expenseDate)',
+      'CREATE INDEX IF NOT EXISTS idx_expenses_created ON expenses(createdAt)',
+      'CREATE INDEX IF NOT EXISTS idx_wastages_date ON wastages(wastageDate)',
+      'CREATE INDEX IF NOT EXISTS idx_wastages_created ON wastages(createdAt)',
+      'CREATE INDEX IF NOT EXISTS idx_wastages_product ON wastages(productId)',
+      'CREATE INDEX IF NOT EXISTS idx_supplier_payments_date '
+          'ON supplier_payments(paymentDate)',
+      'CREATE INDEX IF NOT EXISTS idx_supplier_payments_created '
+          'ON supplier_payments(createdAt)',
+      'CREATE INDEX IF NOT EXISTS idx_supplier_returns_date '
+          'ON supplier_returns(returnDate)',
+      'CREATE INDEX IF NOT EXISTS idx_supplier_returns_created '
+          'ON supplier_returns(createdAt)',
+      // Reload cards.
+      'CREATE INDEX IF NOT EXISTS idx_reload_created ON reload_cards(createdAt)',
+      'CREATE INDEX IF NOT EXISTS idx_reload_status ON reload_cards(status)',
+      'CREATE INDEX IF NOT EXISTS idx_reload_used ON reload_cards(usedAt)',
+      // Repack / production.
+      'CREATE INDEX IF NOT EXISTS idx_productions_produced '
+          'ON productions(producedAt)',
+      'CREATE INDEX IF NOT EXISTS idx_production_components '
+          'ON production_components(productionId)',
+      'CREATE INDEX IF NOT EXISTS idx_recipe_items_recipe '
+          'ON recipe_items(recipeId)',
+      // Shopping bag usage log.
+      'CREATE INDEX IF NOT EXISTS idx_bag_usage_bag '
+          'ON shopping_bag_usage(bagId)',
+      'CREATE INDEX IF NOT EXISTS idx_bag_usage_created '
+          'ON shopping_bag_usage(createdAt)',
+      'CREATE INDEX IF NOT EXISTS idx_bag_usage_sale '
+          'ON shopping_bag_usage(saleId)',
+    ];
+    for (final sql in statements) {
+      try {
+        await db.execute(sql);
+      } catch (e) {
+        developer.log('Index error: $e', name: 'DatabaseService');
+      }
+    }
   }
 
   Future<bool> _tableExists(Database db, String tableName) async {

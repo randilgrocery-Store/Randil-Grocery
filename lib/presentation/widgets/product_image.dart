@@ -176,9 +176,26 @@ class ProductImageStore {
   ///    alongside the database but the database still holds a foreign path.
   ///
   /// Returns null when nothing resolves, so callers show the placeholder.
+  ///
+  /// A POS grid rebuilds on every scan and calls this once per tile, so
+  /// successful resolutions are cached (only hits — a miss is re-checked, so an
+  /// image folder copied onto a counter PC or restored from a backup is picked
+  /// up without a restart).
   static String? resolve(String? stored) {
     if (stored == null || stored.isEmpty) return null;
 
+    final cached = _resolvedCache[stored];
+    if (cached != null) return cached;
+
+    final resolved = _resolveUncached(stored);
+    if (resolved != null) _resolvedCache[stored] = resolved;
+    return resolved;
+  }
+
+  /// Cache of *successful* resolutions only, keyed by the stored value.
+  static final Map<String, String> _resolvedCache = {};
+
+  static String? _resolveUncached(String stored) {
     // Already a full path: use it as-is when it exists here.
     if (stored.length > 2 && (stored[1] == ':' || stored.startsWith(r'\\'))) {
       if (File(stored).existsSync()) return stored;
@@ -229,6 +246,7 @@ class ProductImageStore {
 
   /// Deletes a stored image. Best-effort; failure is not worth surfacing.
   static Future<void> delete(String? stored) async {
+    if (stored == null || stored.isEmpty) return;
     final absolute = resolve(stored);
     if (absolute == null) return;
     try {
@@ -237,6 +255,7 @@ class ProductImageStore {
       // something the user picked from elsewhere on disk.
       if (!file.path.startsWith(directory().path)) return;
       if (file.existsSync()) await file.delete();
+      _resolvedCache.remove(stored);
     } catch (_) {}
   }
 

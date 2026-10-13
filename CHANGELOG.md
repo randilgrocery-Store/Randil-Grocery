@@ -5,6 +5,35 @@ All notable changes to Randil Grocery POS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.19] - 2026-10-13
+
+### Fixed
+- **Refunds now pay back exactly what the customer paid.** When a bill carried
+  a whole-bill discount, a return used to refund the *face* price of the goods —
+  more money than the customer handed over. The discount is now shared across
+  the returned lines, so the payout matches the original bill (a note appears in
+  the Create Return dialog whenever the bill was discounted).
+- **Profit & Loss no longer counts a refund twice.** A refund paid out is now
+  offset by the value of the goods coming back into stock, and the report shows
+  "Refunds paid out" and "Goods returned to stock" separately so the net figure
+  is honest.
+- **Stock totals can no longer drift apart from their batches.** Adding or
+  editing a batch (and re-entering a lot number) now keeps the product's on-hand
+  quantity in lockstep, so FIFO can never sell stock the shop still thinks it
+  has, or the reverse.
+
+### Performance
+- **Database indexes.** Reports, history screens and the live 2-PC sync now use
+  indexes on the columns they filter by (bill dates, batches, refunds, expenses,
+  wastage, received goods and more). Opening months of data stays fast instead
+  of slowing down as the year goes on. Existing databases gain the indexes
+  automatically on the next launch — nothing to re-enter.
+- **Product photos are decoded at display size.** Large pictures are downsampled
+  for the POS and inventory grids and the resolved file path is cached, so a
+  grid of a hundred products no longer re-reads the disk on every scan.
+- **Faster startup.** The launch database snapshot and cloud-backup setup now
+  run just after the window appears instead of holding a blank window first.
+
 ## [1.1.18] - 2026-10-12
 
 ### Added
