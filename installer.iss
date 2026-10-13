@@ -9,7 +9,7 @@
 
 [Setup]
 AppName=Randil Grocery POS
-AppVersion=1.1.19
+AppVersion=1.1.20
 AppPublisher=Jerusha Sharon - Randil Grocery
 AppPublisherURL=https://www.randilgrocery.com
 AppSupportURL=https://www.randilgrocery.com
@@ -19,7 +19,7 @@ AppCopyright=Copyright ?? 2026 Jerusha Sharon. All rights reserved.
 DefaultDirName={autopf}\Randil Grocery POS
 DefaultGroupName=Randil Grocery POS
 OutputDir=installer_output
-OutputBaseFilename=Randil-Grocery-POS-Setup-v1.1.19
+OutputBaseFilename=Randil-Grocery-POS-Setup-v1.1.20
 Compression=lzma2
 SolidCompression=yes
 DisableDirPage=no
@@ -32,8 +32,8 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 VersionInfoCompany=Jerusha Sharon
 VersionInfoProductName=Randil Grocery POS
-VersionInfoProductVersion=1.1.19
-VersionInfoVersion=1.1.19
+VersionInfoProductVersion=1.1.20
+VersionInfoVersion=1.1.20
 VersionInfoCopyright=Jerusha Sharon 2026
 
 [Languages]

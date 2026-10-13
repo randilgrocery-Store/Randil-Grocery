@@ -5,6 +5,23 @@ All notable changes to Randil Grocery POS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.20] - 2026-10-13
+
+### Changed
+- **Backup now tells you the truth.** The Settings → Backup pane warns plainly
+  when cloud backup cannot actually run on this PC (GitHub enabled but no token
+  or repo folder set), instead of letting the uploads fail silently in the
+  background.
+- **Guaranteed encrypted local backup.** A durable, encrypted copy in a
+  persistent folder is now ensured on every launch, so a recoverable backup
+  always exists even when GitHub / Google Drive are unreachable or not set up.
+  The Backup pane shows exactly which folder it is written to and when the
+  newest one was made.
+
+### Notes
+- Existing installs keep all data; nothing to re-enter. The new checks are read
+  from the same database and preferences already on the machine.
+
 ## [1.1.19] - 2026-10-13
 
 ### Fixed

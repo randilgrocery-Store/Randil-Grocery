@@ -118,6 +118,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<String> _printers = [];
   bool _printersLoaded = false;
 
+  /// Backup readiness for the health card: whether a GitHub push can actually
+  /// run on this PC (so a misconfigured cloud backup cannot fail silently) and
+  /// where the guaranteed encrypted local backup is written.
+  bool _githubReady = true;
+  String? _localBackupFolder;
+  DateTime? _lastLocalBackupAt;
+
   /// The active two-pane navigation destination (see [_SettingsNavItem]).
   int _selectedPane = 0;
 
@@ -154,6 +161,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _initializeControllers();
     _loadPrinters();
+    _loadBackupReadiness();
   }
 
   void _initializeControllers() {
@@ -249,6 +257,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _printers = [];
     }
     _printersLoaded = true;
+  }
+
+  /// Resolves whether a GitHub push can actually run here and where the
+  /// guaranteed encrypted local backup lives, so the Backup pane can warn
+  /// before the owner trusts a cloud destination that is not really configured.
+  Future<void> _loadBackupReadiness() async {
+    try {
+      await _backupService.loadGithubCredentials();
+      final settings = context.read<SettingsProvider>().settings;
+      final folder = await _backupService.effectiveLocalBackupPath(
+        customPath: settings.backupLocalPath,
+      );
+      final last = await _backupService.newestLocalBackupAt();
+      if (!mounted) return;
+      setState(() {
+        _githubReady = _backupService.githubReady;
+        _localBackupFolder = folder;
+        _lastLocalBackupAt = last;
+      });
+    } catch (_) {}
   }
 
   @override
@@ -2204,6 +2232,8 @@ Row(
                 const SizedBox(height: AppSpacing.sm),
                 _buildBackupStatusCard(),
                 const SizedBox(height: AppSpacing.sm),
+                _buildBackupHealth(),
+                const SizedBox(height: AppSpacing.sm),
                 Row(
                   children: [
                     Expanded(
@@ -2410,6 +2440,8 @@ Row(
                                         .trim(),
                               );
 
+                              await _loadBackupReadiness();
+
                               if (mounted) {
                                 showTopSnackBar(context, 
                                   SnackBar(
@@ -2571,6 +2603,93 @@ Row(
           ),
         );
       },
+    );
+  }
+
+  /// Backup health: warns plainly when a cloud destination cannot actually run
+  /// (instead of failing silently) and always reports the guaranteed encrypted
+  /// local fallback.
+  Widget _buildBackupHealth() => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!_githubReady) ...[
+            _buildGithubWarning(),
+            const SizedBox(height: AppSpacing.sm),
+          ],
+          _buildLocalBackupCard(),
+        ],
+      );
+
+  Widget _buildGithubWarning() {
+    final colors = context.appColors;
+    final t = context.typography;
+    return AppCard(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_rounded, size: 20, color: colors.warning),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Cloud backup is not set up on this PC',
+                  style: t.body.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'GitHub uploads will be skipped — only the encrypted local '
+                  'backups are being kept. Enter a GitHub Token (or a GitHub '
+                  'Backup Folder) below to switch cloud backup on.',
+                  style: t.caption,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLocalBackupCard() {
+    final colors = context.appColors;
+    final t = context.typography;
+    return AppCard(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.verified_user_outlined, size: 18, color: colors.success),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Guaranteed local backup (encrypted)',
+                  style: t.body.copyWith(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _localBackupFolder ?? 'Resolving folder…',
+                  style: t.caption,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _lastLocalBackupAt == null
+                      ? 'No encrypted backup written yet'
+                      : 'Newest: ${_backupTime(_lastLocalBackupAt!)}',
+                  style: t.caption,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 

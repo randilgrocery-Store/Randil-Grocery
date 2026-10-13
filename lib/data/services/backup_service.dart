@@ -687,6 +687,33 @@ class BackupService {
   /// using this token, so the GitHub backup works everywhere.
   String? get githubToken => _githubToken;
 
+  /// Developer-PC fallback repo. Only ever exists on a machine that has this
+  /// project checked out; a real client install has no such folder, which is
+  /// exactly why [githubReady] must also accept a saved token. Overridable in
+  /// tests so the "not configured" path can be exercised anywhere.
+  @visibleForTesting
+  static String devRepoFallback = r'D:\Randil Grocery POS';
+
+  /// Whether a GitHub push can actually run on this machine right now: a saved
+  /// token (the REST route, works without git) or a resolvable local repo clone
+  /// (the git route). When this is false, GitHub uploads silently do nothing —
+  /// the Settings screen warns about it instead of letting it fail in the dark.
+  bool get githubReady {
+    final token = _githubToken;
+    if (token != null && token.trim().isNotEmpty) return true;
+    final path = _githubSyncPath;
+    if (path != null && path.isNotEmpty && Directory(path).existsSync()) {
+      return true;
+    }
+    try {
+      if (Directory(devRepoFallback).existsSync() &&
+          Directory(p.join(devRepoFallback, '.git')).existsSync()) {
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   Future<void> loadGithubCredentials() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -754,11 +781,10 @@ class BackupService {
           ? _githubSyncPath
           : null;
     }
-    const devRepo = r'D:\Randil Grocery POS';
     try {
-      if (Directory(devRepo).existsSync() &&
-          Directory('$devRepo\\.git').existsSync()) {
-        return devRepo;
+      if (Directory(devRepoFallback).existsSync() &&
+          Directory(p.join(devRepoFallback, '.git')).existsSync()) {
+        return devRepoFallback;
       }
     } catch (_) {}
     return null;
@@ -1224,6 +1250,64 @@ class BackupService {
     }
   }
 
+  /// The folder long-term encrypted backups land in on this machine — the
+  /// durable local fallback that never depends on the cloud. Resolved exactly
+  /// the way [saveLocalBackup] resolves it, so Settings can show the real
+  /// location instead of guessing.
+  Future<String> effectiveLocalBackupPath({String? customPath}) async {
+    try {
+      final dir = await getBackupDirectory(customPath: customPath);
+      return dir.path;
+    } catch (_) {
+      return preferredWindowsBackupPath;
+    }
+  }
+
+  /// Guarantees a durable encrypted local backup exists, writing one when the
+  /// newest is older than [maxAge]. The hourly cycle already does this; running
+  /// it at startup means a PC that is switched off again within seconds still
+  /// leaves a recoverable copy. Returns the new file path when it wrote one, or
+  /// null when a fresh copy already existed (or the write failed).
+  Future<String?> ensureRecentLocalBackup({
+    String? customPath,
+    Duration maxAge = const Duration(hours: 6),
+  }) async {
+    final age = await _newestLocalBackupAge();
+    if (age != null && age < maxAge) return null;
+    final dbPath = await DatabaseService().getDatabasePath();
+    return saveLocalBackup(dbPath, customPath: customPath);
+  }
+
+  /// Age of the newest long-term local backup recorded in preferences, or null
+  /// when none is recorded / the list cannot be read.
+  Future<Duration?> _newestLocalBackupAge() async {
+    final newest = await newestLocalBackupAt();
+    return newest == null ? null : DateTime.now().difference(newest);
+  }
+
+  /// When the newest long-term (encrypted) local backup was written, or null
+  /// when none has been recorded yet. Used by Settings to show the owner that a
+  /// durable copy really exists.
+  Future<DateTime?> newestLocalBackupAt() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList('local_backups') ?? const [];
+      DateTime? newest;
+      for (final entry in raw) {
+        try {
+          final data = jsonDecode(entry) as Map<String, dynamic>;
+          final ts = data['timestamp'];
+          if (ts is! int) continue;
+          final at = DateTime.fromMillisecondsSinceEpoch(ts);
+          if (newest == null || at.isAfter(newest)) newest = at;
+        } catch (_) {}
+      }
+      return newest;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<BackupRunResult> backupNowDetailed({
     required String databasePath,
     required ShopSettings settings,
@@ -1509,11 +1593,13 @@ class BackupService {
 
     if (await isBackupNeeded()) {
       await performBackup(databasePath);
-      await saveLocalBackup(
-        databasePath,
-        customPath: settings?.backupLocalPath,
-      );
     }
+
+    // Guaranteed durable fallback: an encrypted backup in a persistent folder
+    // is ensured on every launch, whether or not any cloud destination is set
+    // up and whether or not a full backup cycle is "due". This is the copy the
+    // shop can always recover from even if GitHub / Drive are unreachable.
+    await ensureRecentLocalBackup(customPath: settings?.backupLocalPath);
 
     await cleanupOldBackups();
 
