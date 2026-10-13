@@ -156,17 +156,14 @@ class _BackupManagementScreenState extends State<BackupManagementScreen> {
       );
 
       if (mounted) {
+        final text = result.localSaved
+            ? (result.message == null
+                ? result.summary
+                : '${result.summary}\n${result.message}')
+            : 'Backup failed: ${result.message ?? 'unknown error'}';
         showTopSnackBar(context, 
           SnackBar(
-            content: Text(
-              result.localSaved
-                  ? result.cloudEnabled
-                      ? result.cloudUploaded
-                          ? 'Backup created and uploaded to Google Drive'
-                          : 'Local backup saved. Google Drive upload failed: ${result.message ?? 'unknown error'}'
-                      : 'Backup created successfully: ${result.localPath ?? 'saved'}'
-                  : 'Backup creation failed: ${result.message ?? 'unknown error'}',
-            ),
+            content: Text(text),
             backgroundColor: result.localSaved
                 ? PosAppTheme.successGreen
                 : PosAppTheme.warningOrange,

@@ -1,6 +1,8 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:randil_grocery_pos/core/utils/secure_storage.dart';
+import 'package:randil_grocery_pos/data/models/shop_settings.dart';
 import 'package:randil_grocery_pos/data/services/backup_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -80,6 +82,74 @@ void main() {
       });
       // Fresh (< 6h) => no DB VACUUM/no encryption, returns null quickly.
       expect(await svc.ensureRecentLocalBackup(), isNull);
+    });
+  });
+
+  group('durable Google Drive credentials', () {
+    test('blank fields keep the saved credentials', () async {
+      await svc.setDriveOAuth(
+        clientId: 'cid',
+        clientSecret: 'secret',
+        refreshToken: 'refresh',
+      );
+      expect(await svc.hasDriveRefreshCredentials(), isTrue);
+
+      // Saving the form with all three blank must not wipe what is stored.
+      await svc.setDriveOAuth(
+        clientId: '',
+        clientSecret: '',
+        refreshToken: '',
+      );
+      final oauth = await svc.loadDriveOAuth();
+      expect(await svc.hasDriveRefreshCredentials(), isTrue);
+      expect(oauth['clientId'], 'cid');
+      expect(oauth['refreshToken'], 'refresh');
+    });
+
+    test('driveReady is true when a refresh credential is saved', () async {
+      await svc.setDriveOAuth(
+        clientId: 'cid',
+        clientSecret: 'secret',
+        refreshToken: 'refresh',
+      );
+      expect(await svc.driveReady(ShopSettings()), isTrue);
+    });
+
+    test('driveReady falls back to the pasted access token', () async {
+      final settings = ShopSettings(
+        googleDriveAccessToken:
+            SecureStorageService().encryptString('ya29.example'),
+      );
+      expect(await svc.driveReady(settings), isTrue);
+    });
+
+    test('driveReady is false when nothing is saved', () async {
+      expect(await svc.driveReady(ShopSettings()), isFalse);
+    });
+  });
+
+  group('BackupRunResult.summary', () {
+    test('names all three destinations', () {
+      const result = BackupRunResult(
+        localSaved: true,
+        githubUploaded: true,
+        driveConfigured: true,
+        driveUploaded: false,
+      );
+      expect(result.summary, contains('Local saved'));
+      expect(result.summary, contains('GitHub uploaded'));
+      expect(result.summary, contains('Drive failed'));
+    });
+
+    test('reports Drive off when it is not configured', () {
+      const result = BackupRunResult(
+        localSaved: true,
+        githubUploaded: false,
+        driveConfigured: false,
+        driveUploaded: false,
+      );
+      expect(result.summary, contains('GitHub failed'));
+      expect(result.summary, contains('Drive off'));
     });
   });
 }

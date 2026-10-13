@@ -16,19 +16,45 @@ import '../models/shop_settings.dart';
 class BackupRunResult {
   const BackupRunResult({
     required this.localSaved,
-    required this.cloudEnabled,
-    required this.cloudUploaded,
+    required this.githubUploaded,
+    required this.driveConfigured,
+    required this.driveUploaded,
     this.localPath,
     this.message,
   });
 
+  /// The durable encrypted local copy (or at least the crash-safe temp copy)
+  /// was written.
   final bool localSaved;
-  final bool cloudEnabled;
-  final bool cloudUploaded;
+
+  /// The copy reached GitHub, either by git push or the REST API.
+  final bool githubUploaded;
+
+  /// Google Drive backup is switched on, so the Drive result is meaningful.
+  final bool driveConfigured;
+
+  /// The copy reached Google Drive.
+  final bool driveUploaded;
+
   final String? localPath;
   final String? message;
 
   bool get isSuccess => localSaved;
+
+  // Back-compat aliases for callers that only ever knew about the Drive cloud.
+  bool get cloudEnabled => driveConfigured;
+  bool get cloudUploaded => driveUploaded;
+
+  /// One plain-language line naming every destination, for snackbars.
+  String get summary {
+    if (!localSaved) return message ?? 'Backup failed.';
+    final parts = <String>['Local saved'];
+    parts.add(githubUploaded ? 'GitHub uploaded' : 'GitHub failed');
+    parts.add(driveConfigured
+        ? (driveUploaded ? 'Drive uploaded' : 'Drive failed')
+        : 'Drive off');
+    return parts.join('  ·  ');
+  }
 }
 
 /// Live view of the automatic backup pipeline, used by the Settings screen to
@@ -438,12 +464,11 @@ class BackupService {
       // Google Drive next, only when the shop turned it on.
       final settings = await _safeSettings();
       if (settings != null && settings.enableGoogleDriveBackup) {
-        final token = SecureStorageService()
-            .decryptString(settings.googleDriveAccessToken);
-        if (token != null && token.trim().isNotEmpty) {
+        final token = await driveAccessToken(settings);
+        if (token != null) {
           final ok = await uploadBackupToGoogleDrive(
             backupFilePath: snapshot,
-            accessToken: token.trim(),
+            accessToken: token,
             folderId: settings.googleDriveFolderId.trim().isEmpty
                 ? defaultGoogleDriveFolderId
                 : settings.googleDriveFolderId,
@@ -453,7 +478,8 @@ class BackupService {
               ? 'Google Drive updated ${_time(DateTime.now())}'
               : 'Google Drive push failed: ${_lastError ?? 'unknown'}';
         } else {
-          _lastCloudStatus = 'Google Drive is switched off.';
+          _lastCloudStatus = 'Google Drive is switched on but no working '
+              'credential is saved.';
         }
       }
     } catch (e) {
@@ -670,6 +696,122 @@ class BackupService {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove(_prefsDriveFileId);
     } catch (_) {}
+  }
+
+  // ===================== Google Drive credentials =====================
+  static const String _prefsDriveRefreshToken = 'gdrive_refresh_token';
+  static const String _prefsDriveClientId = 'gdrive_client_id';
+  static const String _prefsDriveClientSecret = 'gdrive_client_secret';
+
+  /// Saves the optional durable Drive credentials (encrypted). When all three
+  /// are present the app mints a fresh access token automatically before every
+  /// upload, so Drive keeps working without re-pasting a short-lived token.
+  Future<void> setDriveOAuth({
+    required String clientId,
+    required String clientSecret,
+    required String refreshToken,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final secure = SecureStorageService();
+      final entries = {
+        _prefsDriveClientId: clientId,
+        _prefsDriveClientSecret: clientSecret,
+        _prefsDriveRefreshToken: refreshToken,
+      };
+      for (final entry in entries.entries) {
+        final value = entry.value.trim();
+        // Blank means "keep whatever is already saved", so saving the form
+        // never wipes a working credential.
+        if (value.isEmpty) continue;
+        await prefs.setString(entry.key, secure.encryptString(value));
+      }
+    } catch (_) {}
+  }
+
+  /// The decrypted durable Drive credentials, empty strings when not set.
+  Future<Map<String, String>> loadDriveOAuth() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final secure = SecureStorageService();
+      return {
+        'clientId': secure
+                .decryptString(prefs.getString(_prefsDriveClientId) ?? '') ??
+            '',
+        'clientSecret': secure.decryptString(
+                prefs.getString(_prefsDriveClientSecret) ?? '') ??
+            '',
+        'refreshToken': secure.decryptString(
+                prefs.getString(_prefsDriveRefreshToken) ?? '') ??
+            '',
+      };
+    } catch (_) {
+      return const {'clientId': '', 'clientSecret': '', 'refreshToken': ''};
+    }
+  }
+
+  /// True when a full refresh-token set is saved.
+  Future<bool> hasDriveRefreshCredentials() async {
+    final oauth = await loadDriveOAuth();
+    return oauth['clientId']!.isNotEmpty &&
+        oauth['clientSecret']!.isNotEmpty &&
+        oauth['refreshToken']!.isNotEmpty;
+  }
+
+  /// Exchanges the saved refresh token for a fresh access token. Returns null
+  /// when no refresh credentials are configured or Google rejects them.
+  Future<String?> _refreshDriveAccessToken() async {
+    try {
+      final oauth = await loadDriveOAuth();
+      final clientId = oauth['clientId']!;
+      final clientSecret = oauth['clientSecret']!;
+      final refreshToken = oauth['refreshToken']!;
+      if (clientId.isEmpty || clientSecret.isEmpty || refreshToken.isEmpty) {
+        return null;
+      }
+      final response = await http.post(
+        Uri.parse('https://oauth2.googleapis.com/token'),
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: {
+          'client_id': clientId,
+          'client_secret': clientSecret,
+          'refresh_token': refreshToken,
+          'grant_type': 'refresh_token',
+        },
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final token = data['access_token'] as String?;
+        if (token != null && token.trim().isNotEmpty) return token.trim();
+      }
+      _lastError = 'Google Drive token refresh failed '
+          '(${response.statusCode}): ${response.body}';
+      _publishStatus((s) => s.copyWith(lastDriveError: _lastError));
+    } catch (e) {
+      _lastError = 'Google Drive token refresh failed: $e';
+      _publishStatus((s) => s.copyWith(lastDriveError: _lastError));
+    }
+    return null;
+  }
+
+  /// The best access token for a Drive upload: a freshly minted one from the
+  /// saved refresh token when configured, otherwise the pasted access token.
+  Future<String?> driveAccessToken(ShopSettings? settings) async {
+    final refreshed = await _refreshDriveAccessToken();
+    if (refreshed != null) return refreshed;
+    if (settings == null) return null;
+    final raw =
+        SecureStorageService().decryptString(settings.googleDriveAccessToken);
+    return (raw != null && raw.trim().isNotEmpty) ? raw.trim() : null;
+  }
+
+  /// Whether Google Drive has any usable credential saved.
+  Future<bool> driveReady(ShopSettings? settings) async {
+    if (await hasDriveRefreshCredentials()) return true;
+    if (settings == null) return false;
+    final raw =
+        SecureStorageService().decryptString(settings.googleDriveAccessToken);
+    return raw != null && raw.trim().isNotEmpty;
   }
 
   // ===================== GitHub =====================
@@ -1308,73 +1450,110 @@ class BackupService {
     }
   }
 
-  Future<BackupRunResult> backupNowDetailed({
+  /// The single backup pass used by both the automatic cycle and the one manual
+  /// "Backup Now" button: a crash-safe temp copy, an encrypted durable local
+  /// copy, a GitHub push, and a Google Drive push (when enabled). Keeping one
+  /// path means automatic and manual backups can never diverge or skip a
+  /// destination.
+  Future<BackupRunResult> _fullBackupPass({
     required String databasePath,
-    required ShopSettings settings,
+    ShopSettings? settings,
+    bool archive = false,
   }) async {
-    // 1. Immediate crash-safe copy in the temp folder (always).
+    final effective = settings ?? await _safeSettings();
+    _lastError = null;
+
+    // 1. Crash-safe copy in the temp folder (also refreshes latest.db).
     final tempSnapshot = await _writeLocalSnapshot();
 
-    // 2. Encrypted long-term copy in the shop's own backup folder.
+    // 2. Encrypted durable copy in the shop's own backup folder.
     final localBackupPath = await saveLocalBackup(
       databasePath,
-      customPath: settings.backupLocalPath,
+      customPath: effective?.backupLocalPath,
     );
+    final localErr = _lastError;
+    final localSaved = localBackupPath != null || tempSnapshot != null;
+    final source = tempSnapshot ?? localBackupPath;
 
-    if (localBackupPath == null) {
-      return BackupRunResult(
-        localSaved: tempSnapshot != null,
-        cloudEnabled: settings.enableGoogleDriveBackup,
-        cloudUploaded: false,
-        localPath: tempSnapshot,
-        message: _lastError ?? 'Backup creation failed',
+    // 3. GitHub (git when available, otherwise the REST token).
+    var githubOk = false;
+    String? githubErr;
+    if (source != null) {
+      githubOk = await pushSnapshotToGithub(
+        snapshotPath: source,
+        archive: archive,
       );
+      githubErr = githubOk ? null : _lastError;
+    } else {
+      githubErr = 'No snapshot was available to push to GitHub.';
     }
 
-    await performBackup(databasePath);
-
-    var uploaded = false;
-    if (settings.enableGoogleDriveBackup) {
-      final rawToken =
-          SecureStorageService().decryptString(settings.googleDriveAccessToken);
-      if (rawToken == null || rawToken.trim().isEmpty) {
-        return BackupRunResult(
-          localSaved: true,
-          cloudEnabled: true,
-          cloudUploaded: false,
-          localPath: localBackupPath,
-          message: 'Saved Google Drive token could not be decrypted. '
-              'Re-enter the token in Backup Settings.',
+    // 4. Google Drive, when the shop switched it on.
+    final driveConfigured = effective?.enableGoogleDriveBackup ?? false;
+    var driveOk = false;
+    String? driveErr;
+    if (driveConfigured && source != null) {
+      final token = await driveAccessToken(effective);
+      if (token == null) {
+        driveErr = 'Google Drive is on but no working credential is saved '
+            '(paste an access token, or a refresh token with client id/secret).';
+        _publishStatus((s) => s.copyWith(lastDriveError: driveErr));
+      } else {
+        final folderId =
+            (effective?.googleDriveFolderId.trim().isEmpty ?? true)
+                ? defaultGoogleDriveFolderId
+                : effective!.googleDriveFolderId.trim();
+        if (archive) {
+          // Keep an hourly dated copy for history, then refresh the fixed file
+          // below so recovery is always possible from one known name.
+          final stamp = _fileStamp(DateTime.now());
+          final archived = await _archiveCopy(source, 'pos_hourly_$stamp.db');
+          if (archived != null) {
+            await uploadBackupToGoogleDrive(
+              backupFilePath: archived,
+              accessToken: token,
+              folderId: folderId,
+              fileName: 'RandilPOS_hourly_$stamp.db',
+            );
+          }
+        }
+        driveOk = await uploadBackupToGoogleDrive(
+          backupFilePath: source,
+          accessToken: token,
+          folderId: folderId,
+          fileName: driveFileName,
         );
+        driveErr = driveOk ? null : _lastError;
+        _lastCloudStatus = driveOk
+            ? 'Google Drive updated ${_time(DateTime.now())}'
+            : 'Google Drive upload failed: ${_lastError ?? 'unknown'}';
       }
+    } else if (driveConfigured) {
+      driveErr = 'No snapshot was available to upload to Google Drive.';
+    }
 
-      uploaded = await uploadBackupToGoogleDrive(
-        backupFilePath: tempSnapshot ?? localBackupPath,
-        accessToken: rawToken,
-        folderId: settings.googleDriveFolderId.trim().isEmpty
-            ? defaultGoogleDriveFolderId
-            : settings.googleDriveFolderId,
-        fileName: driveFileName,
-      );
-
-      return BackupRunResult(
-        localSaved: true,
-        cloudEnabled: true,
-        cloudUploaded: uploaded,
-        localPath: localBackupPath,
-        message: uploaded
-            ? null
-            : (_lastError ?? 'Google Drive upload failed'),
-      );
+    if (localBackupPath != null) {
+      await performBackup(databasePath);
     }
 
     return BackupRunResult(
-      localSaved: true,
-      cloudEnabled: false,
-      cloudUploaded: false,
-      localPath: localBackupPath,
+      localSaved: localSaved,
+      githubUploaded: githubOk,
+      driveConfigured: driveConfigured,
+      driveUploaded: driveOk,
+      localPath: localBackupPath ?? tempSnapshot,
+      message: localSaved
+          ? (driveErr ?? githubErr)
+          : (localErr ?? 'Backup creation failed'),
     );
   }
+
+  /// One full manual backup: local + GitHub + Google Drive.
+  Future<BackupRunResult> backupNowDetailed({
+    required String databasePath,
+    required ShopSettings settings,
+  }) =>
+      _fullBackupPass(databasePath: databasePath, settings: settings);
 
   Future<bool> backupNow({
     required String databasePath,
@@ -1478,62 +1657,26 @@ class BackupService {
   Timer? _snapshotTimer;
 
   /// One full pass every hour: temp copy, encrypted long-term copy, and both
-  /// cloud destinations (with a dated archive kept for history).
+  /// cloud destinations (with a dated archive kept for history). Runs through
+  /// the exact same [_fullBackupPass] as the manual button, so automatic and
+  /// manual backups always cover all three destinations.
   Future<void> _runHourlyCycle(
     String databasePath, {
     ShopSettings? settings,
   }) async {
     try {
-      _lastError = null;
       _lastCloudStatus = 'Automatic backup running...';
 
-      final tempSnapshot = await _writeLocalSnapshot();
+      // Read the current settings so a change made in Settings (a new Drive
+      // credential or backup folder) takes effect on the next automatic run,
+      // not only after a restart.
+      final effective = await _safeSettings() ?? settings;
 
-      final localPath = settings == null
-          ? await saveLocalBackup(databasePath)
-          : await saveLocalBackup(databasePath,
-              customPath: settings.backupLocalPath);
-
-      if (tempSnapshot != null) {
-        await pushSnapshotToGithub(snapshotPath: tempSnapshot, archive: true);
-
-        if (settings != null &&
-            settings.enableGoogleDriveBackup &&
-            localPath != null) {
-          final rawToken = SecureStorageService()
-              .decryptString(settings.googleDriveAccessToken);
-          if (rawToken != null && rawToken.trim().isNotEmpty) {
-            final stamp = _fileStamp(DateTime.now());
-            final archived = await _archiveCopy(
-              tempSnapshot,
-              'pos_hourly_$stamp.db',
-            );
-            final uploaded = await uploadBackupToGoogleDrive(
-              backupFilePath: archived ?? tempSnapshot,
-              accessToken: rawToken.trim(),
-              folderId: settings.googleDriveFolderId.trim().isEmpty
-                  ? defaultGoogleDriveFolderId
-                  : settings.googleDriveFolderId,
-              fileName: 'RandilPOS_hourly_$stamp.db',
-            );
-            _lastCloudStatus = uploaded
-                ? 'Google Drive updated ${_time(DateTime.now())}'
-                : 'Google Drive upload failed: ${_lastError ?? 'unknown'}';
-            // Keep the main Drive file current too, so recovery is always
-            // possible from a single known file.
-            await uploadBackupToGoogleDrive(
-              backupFilePath: tempSnapshot,
-              accessToken: rawToken.trim(),
-              folderId: settings.googleDriveFolderId.trim().isEmpty
-                  ? defaultGoogleDriveFolderId
-                  : settings.googleDriveFolderId,
-              fileName: driveFileName,
-            );
-          } else {
-            _lastCloudStatus = 'Google Drive token unavailable - skipped.';
-          }
-        }
-      }
+      await _fullBackupPass(
+        databasePath: databasePath,
+        settings: effective,
+        archive: true,
+      );
 
       await cleanupOldBackups();
     } catch (e) {

@@ -103,6 +103,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _googleDriveAccessTokenController;
   late TextEditingController _googleDriveFolderIdController;
   late TextEditingController _googleDriveAdminEmailController;
+  late TextEditingController _googleDriveClientIdController;
+  late TextEditingController _googleDriveClientSecretController;
+  late TextEditingController _googleDriveRefreshTokenController;
   late TextEditingController _networkPortController;
   late TextEditingController _serverIpFallbackController;
   late TextEditingController _cloudUrlController;
@@ -124,6 +127,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _githubReady = true;
   String? _localBackupFolder;
   DateTime? _lastLocalBackupAt;
+
+  /// Whether a durable (auto-refreshing) Google Drive credential is saved, so
+  /// the warnings can tell the difference between "no credential at all" and
+  /// "only a short-lived access token".
+  bool _driveRefreshConfigured = false;
+
+  /// Whether Google Drive has any usable credential saved at all.
+  bool _driveReady = false;
 
   /// The active two-pane navigation destination (see [_SettingsNavItem]).
   int _selectedPane = 0;
@@ -187,6 +198,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _googleDriveAdminEmailController = TextEditingController(
       text: settings.googleDriveAdminEmail,
     );
+    // Durable Drive credentials live (encrypted) in preferences, never shown
+    // back in the fields. Leaving them blank keeps whatever is saved.
+    _googleDriveClientIdController = TextEditingController();
+    _googleDriveClientSecretController = TextEditingController();
+    _googleDriveRefreshTokenController = TextEditingController();
     _githubSyncPathController =
         TextEditingController(text: _backupService.githubSyncPath ?? '');
     // Never surface the stored token; leaving it blank keeps the saved one.
@@ -270,11 +286,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         customPath: settings.backupLocalPath,
       );
       final last = await _backupService.newestLocalBackupAt();
+      final driveRefresh = await _backupService.hasDriveRefreshCredentials();
+      final driveReady = await _backupService.driveReady(settings);
       if (!mounted) return;
       setState(() {
         _githubReady = _backupService.githubReady;
         _localBackupFolder = folder;
         _lastLocalBackupAt = last;
+        _driveRefreshConfigured = driveRefresh;
+        _driveReady = driveReady;
       });
     } catch (_) {}
   }
@@ -291,6 +311,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _googleDriveAccessTokenController.dispose();
     _googleDriveFolderIdController.dispose();
     _googleDriveAdminEmailController.dispose();
+    _googleDriveClientIdController.dispose();
+    _googleDriveClientSecretController.dispose();
+    _googleDriveRefreshTokenController.dispose();
     _networkPortController.dispose();
     _serverIpFallbackController.dispose();
     _cloudUrlController.dispose();
@@ -324,32 +347,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
         settings: settings,
       );
 
-      // Same manual action also pushes a plain .db snapshot to GitHub.
-      final githubOk =
-          await _backupService.pushSnapshotToGithub(snapshotPath: dbPath);
-
       if (!mounted) {
         return;
       }
 
-      final githubMsg = githubOk
-          ? (result.cloudEnabled
-              ? ''
-              : ' (also pushed to GitHub)')
-          : ' (GitHub push failed: '
-              '${_backupService.lastError ?? 'unknown'})';
+      // One line naming all three destinations, plus the error detail when a
+      // destination failed, so a single press tells the whole story.
+      final text = result.localSaved
+          ? (result.message == null
+              ? result.summary
+              : '${result.summary}\n${result.message}')
+          : 'Backup failed: ${result.message ?? 'unknown error'}';
 
       showTopSnackBar(context, 
         SnackBar(
-          content: Text(
-          result.localSaved
-            ? result.cloudEnabled
-              ? result.cloudUploaded
-                ? 'Backup created, uploaded to Google Drive$githubMsg'
-                : 'Local backup saved. Google Drive upload failed: ${result.message ?? 'unknown error'}$githubMsg'
-              : 'Backup created successfully: ${result.localPath ?? 'saved'}$githubMsg'
-            : 'Backup creation failed: ${result.message ?? 'unknown error'}',
-          ),
+          content: Text(text),
           backgroundColor: result.localSaved
             ? PosAppTheme.successGreen
             : PosAppTheme.warningOrange,
@@ -2365,6 +2377,46 @@ Row(
                           controller: _googleDriveAdminEmailController,
                           keyboardType: TextInputType.emailAddress,
                         ),
+                        const SizedBox(height: 10),
+                        Text(
+                          _driveRefreshConfigured
+                              ? 'Durable Drive auth is saved. Leave the three '
+                                  'fields below blank to keep it.'
+                              : 'Recommended: durable auth. Paste the Client ID, '
+                                  'Client Secret and Refresh Token from a Google '
+                                  'Cloud OAuth client so Drive keeps working '
+                                  'automatically instead of expiring after an hour.',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: PosAppTheme.textGray,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        GroceryTextField(
+                          label: 'Drive Client ID',
+                          hint: _driveRefreshConfigured
+                              ? 'Saved securely. Leave blank to keep it.'
+                              : 'From Google Cloud Console → OAuth client',
+                          controller: _googleDriveClientIdController,
+                        ),
+                        const SizedBox(height: 10),
+                        GroceryTextField(
+                          label: 'Drive Client Secret',
+                          hint: _driveRefreshConfigured
+                              ? 'Saved securely. Leave blank to keep it.'
+                              : 'OAuth client secret',
+                          controller: _googleDriveClientSecretController,
+                          obscureText: true,
+                        ),
+                        const SizedBox(height: 10),
+                        GroceryTextField(
+                          label: 'Drive Refresh Token',
+                          hint: _driveRefreshConfigured
+                              ? 'Saved securely. Leave blank to keep it.'
+                              : 'One-time token (access_type=offline)',
+                          controller: _googleDriveRefreshTokenController,
+                          obscureText: true,
+                        ),
                       ],
                       const SizedBox(height: 14),
                       GroceryTextField(
@@ -2420,9 +2472,15 @@ Row(
                               await _backupService.setGithubSyncPath(
                                 _githubSyncPathController.text,
                               );
-                              await _backupService.setGithubToken(
-                                _githubTokenController.text,
-                              );
+                              // Blank keeps the saved token (the field is never
+                              // pre-filled), so saving the form cannot wipe it.
+                              final githubTokenInput =
+                                  _githubTokenController.text.trim();
+                              if (githubTokenInput.isNotEmpty) {
+                                await _backupService.setGithubToken(
+                                  githubTokenInput,
+                                );
+                              }
                               await settingsProvider.updateBackupSettings(
                                 backupLocalPath:
                                     _backupLocalPathController.text.trim(),
@@ -2439,6 +2497,19 @@ Row(
                                     _googleDriveAdminEmailController.text
                                         .trim(),
                               );
+
+                              // Durable Drive credentials: blank fields keep
+                              // whatever is already saved.
+                              await _backupService.setDriveOAuth(
+                                clientId: _googleDriveClientIdController.text,
+                                clientSecret:
+                                    _googleDriveClientSecretController.text,
+                                refreshToken:
+                                    _googleDriveRefreshTokenController.text,
+                              );
+                              _googleDriveClientIdController.clear();
+                              _googleDriveClientSecretController.clear();
+                              _googleDriveRefreshTokenController.clear();
 
                               await _loadBackupReadiness();
 
@@ -2609,16 +2680,58 @@ Row(
   /// Backup health: warns plainly when a cloud destination cannot actually run
   /// (instead of failing silently) and always reports the guaranteed encrypted
   /// local fallback.
-  Widget _buildBackupHealth() => Column(
+  Widget _buildBackupHealth() {
+    final driveEnabled =
+        context.read<SettingsProvider>().settings.enableGoogleDriveBackup;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (!_githubReady) ...[
+          _buildGithubWarning(),
+          const SizedBox(height: AppSpacing.sm),
+        ],
+        if (driveEnabled && !_driveReady) ...[
+          _buildDriveWarning(),
+          const SizedBox(height: AppSpacing.sm),
+        ],
+        _buildLocalBackupCard(),
+      ],
+    );
+  }
+
+  Widget _buildDriveWarning() {
+    final colors = context.appColors;
+    final t = context.typography;
+    return AppCard(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!_githubReady) ...[
-            _buildGithubWarning(),
-            const SizedBox(height: AppSpacing.sm),
-          ],
-          _buildLocalBackupCard(),
+          Icon(Icons.warning_amber_rounded, size: 20, color: colors.warning),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Google Drive backup has no credential',
+                  style: t.body.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Drive is switched on but no working credential is saved, so '
+                  'Drive uploads are skipped. Paste an access token, or the '
+                  'Client ID, Client Secret and Refresh Token for automatic '
+                  'renewal.',
+                  style: t.caption,
+                ),
+              ],
+            ),
+          ),
         ],
-      );
+      ),
+    );
+  }
 
   Widget _buildGithubWarning() {
     final colors = context.appColors;

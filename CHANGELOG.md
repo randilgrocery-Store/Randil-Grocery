@@ -5,6 +5,31 @@ All notable changes to Randil Grocery POS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.21] - 2026-10-13
+
+### Changed
+- **One backup path for every destination.** A single press of "Create Backup
+  Now" now saves the encrypted local copy and pushes it to GitHub *and* Google
+  Drive in one go (before, the manual button and the automatic cycle could each
+  skip a destination). The automatic hourly cycle now runs through the very same
+  path, so automatic and manual backups can never diverge.
+- **Automatic backup always uses the current settings.** The hourly cycle
+  re-reads the saved settings, so a new Drive credential or backup folder takes
+  effect on the next automatic run instead of only after a restart.
+- **Durable Google Drive (optional).** Drive can now be set up with a Client ID,
+  Client Secret and Refresh Token, so the app mints a fresh access token by
+  itself instead of stopping about an hour after a token is pasted. A pasted
+  access token still works exactly as before.
+- **Honest Drive + GitHub status.** The Backup pane warns when Drive is switched
+  on with no saved credential, and every backup reports exactly which
+  destinations received the copy (Local / GitHub / Drive).
+
+### Fixed
+- Saving Backup Settings no longer wipes a saved GitHub token when its field is
+  left blank.
+- The manual backup now pushes the consistent snapshot to GitHub (the previous
+  code pushed the live database file).
+
 ## [1.1.20] - 2026-10-13
 
 ### Changed
